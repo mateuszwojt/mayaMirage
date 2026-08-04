@@ -42,22 +42,16 @@ void *RenderGlobalsNode::creator()
 	return (new RenderGlobalsNode);
 }
 
-MStatus RenderGlobalsNode::initialize()
+Mirage::Options RenderGlobalsNode::DefaultOptions()
 {
-	MStatus status;
-	MFnNumericAttribute numAttr;
-    MFnEnumAttribute eAttr;
-
 	// Mirage::Options has no default member initializers on most of its
 	// scalar fields (only Filter's own default-constructed member and
-	// aovMask are actually defined by "Options opts;" alone) - the previous
-	// version of this function read indeterminate stack memory as the
-	// "default" values shown for every one of these attributes on a
-	// freshly-created render-globals node. Value-initialize (zeroes
-	// everything not explicitly set below) and then assign the same sane
-	// defaults used elsewhere in the Mirage tools (mirage/tools/scene_renderer/
-	// SceneRenderer.cpp, mirage/tools/kernel_validate/KernelValidate.cpp),
-	// rather than relying on undefined behavior for the UI's shown defaults.
+	// aovMask are actually defined by "Options opts;" alone) - value-
+	// initialize (zeroes everything not explicitly set below) and then
+	// assign the same sane defaults used elsewhere in the Mirage tools
+	// (mirage/tools/scene_renderer/SceneRenderer.cpp, mirage/tools/
+	// kernel_validate/KernelValidate.cpp), rather than relying on
+	// undefined/zeroed values.
 	Mirage::Options opts{};
 	opts.type = Mirage::RenderType::eCpu;
 	opts.mode = Mirage::RenderMode::ePathTrace;
@@ -70,6 +64,16 @@ MStatus RenderGlobalsNode::initialize()
 	opts.maxDepth = 5;
 	opts.maxSamples = 16;
 	opts.enableDOF = false;
+	return opts;
+}
+
+MStatus RenderGlobalsNode::initialize()
+{
+	MStatus status;
+	MFnNumericAttribute numAttr;
+    MFnEnumAttribute eAttr;
+
+	const Mirage::Options opts = DefaultOptions();
 
 	gRenderType = eAttr.create("renderType", "renderType", opts.type, &status);
 	CHECK_MSTATUS(status);
@@ -218,17 +222,25 @@ void RenderGlobalsNode::clean()
 Mirage::Options RenderGlobalsNode::getRenderOptions()
 {
 	MObject mObj;
-	// Value-initialize: width/height/clamp aren't set by this function (the
-	// caller overwrites width/height/clamp itself today) and Options has no
-	// default member initializers for them - leaving them indeterminate is
-	// a latent bug waiting for a future caller that forgets to overwrite one.
-	Mirage::Options opts{};
+	// Seed from the same sane defaults the node's own attributes use
+	// (DefaultOptions()), not a bare value-initialized Options - width/
+	// height/clamp aren't set by this function (the caller overwrites
+	// width/height/clamp itself today) and, more importantly,
+	// mode/exposure/maxSamples/maxDepth *are* meant to come from here, so a
+	// zeroed fallback (maxSamples == 0 in particular - see
+	// RenderWorker::ThreadMain's `samples < maxSamples` loop condition,
+	// which then never runs a single sample) previously meant any render
+	// kicked off before "defaultMirageRenderGlobals" exists (i.e. before
+	// Render Settings' Mirage tab has ever been opened - see
+	// MirageMaya/globals.py's create_render_globals_node()) silently
+	// produced one all-black frame instead of erroring.
+	Mirage::Options opts = DefaultOptions();
 
 	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
 	{
-		return Mirage::Options();
+		return opts;
 	}
-	
+
 	int renderType;
 	MPlug pRenderType(mObj, gRenderType);
 	pRenderType.getValue(renderType);
