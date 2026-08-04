@@ -26,7 +26,24 @@ void RenderProcedure::translateCamera(MString cameraName)
 	m_Camera.position = Mirage::Vec3(mOrigin.x, mOrigin.y, mOrigin.z);
 	std::cout << "\tCamera position : " << m_Camera.position.x << ", " << m_Camera.position.y << ", " << m_Camera.position.z << std::endl;
 
-	MFnTransform mXform(mDag);
+	// Do NOT reuse `mDag` (whatever cameraName happened to resolve to) here -
+	// MFnCamera is forgiving about that (it auto-descends from a transform's
+	// path to find its camera shape below, so `camera` above is correctly
+	// attached either way), but MFnTransform has no equivalent auto-ascend
+	// from a shape to its parent transform. If cameraName resolves to the
+	// camera *shape* (e.g. Maya's renderer -renderProcedure mechanism has
+	// been observed passing the shape name, not the transform), mXform below
+	// would silently attach to nothing usable and getRotation() would fail
+	// without altering `rotation` from its default-constructed identity -
+	// meaning the render camera's orientation would never track Maya's
+	// actual camera rotation at all (only its position, via eyePoint() above,
+	// which MFnCamera resolves correctly regardless). Deriving the transform
+	// path from camera's own confirmed shape path instead is correct no
+	// matter which form cameraName came in as.
+	MDagPath transformDag = camera.dagPath();
+	transformDag.pop();
+
+	MFnTransform mXform(transformDag);
 	MQuaternion rotation;
 	mXform.getRotation(rotation, MSpace::kWorld);
 	m_Camera.rotation = Mirage::Quat(rotation.x, rotation.y, rotation.z, rotation.w);
