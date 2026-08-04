@@ -217,14 +217,30 @@ void RenderWorker::PushPixelsToRenderView(const std::vector<Mirage::Color> &pixe
 
 	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 
+	// MRenderView::updatePixels() (like getRenderRegion()/refresh(), all
+	// defined in terms of left/right/bottom/top) follows Maya's OpenGL-style
+	// bottom-left-origin convention: row 0 of the buffer is the *bottom*
+	// scanline. Mirage's own CameraSampler (mirage/utils/Util.h) writes its
+	// output buffer the conventional top-down way instead - rasterToScreen
+	// maps raster row 0 to screen Y = +1 (the top of the image), the same
+	// row order virtually every image file format and GPU texture uses.
+	// Without this flip, the Render View shows a vertically mirrored image -
+	// confirmed against a real scene, where geometry at the back/top of the
+	// Maya viewport rendered at the bottom of the Render View and vice versa.
 	std::vector<RV_PIXEL> outPixels(pixels.size());
-	for (size_t i = 0; i < pixels.size(); ++i)
+	for (int y = 0; y < height; ++y)
 	{
-		Mirage::Color resolved = ResolveBackendPixel(pixels[i], isGpu);
-		outPixels[i].r = resolved.x * 255.0f;
-		outPixels[i].g = resolved.y * 255.0f;
-		outPixels[i].b = resolved.z * 255.0f;
-		outPixels[i].a = 255.0f;
+		const size_t srcRowStart = static_cast<size_t>(y) * width;
+		const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
+		for (int x = 0; x < width; ++x)
+		{
+			Mirage::Color resolved = ResolveBackendPixel(pixels[srcRowStart + x], isGpu);
+			RV_PIXEL &out = outPixels[dstRowStart + x];
+			out.r = resolved.x * 255.0f;
+			out.g = resolved.y * 255.0f;
+			out.b = resolved.z * 255.0f;
+			out.a = 255.0f;
+		}
 	}
 
 	MRenderView::updatePixels(0, width - 1, 0, height - 1, outPixels.data());
@@ -241,44 +257,64 @@ namespace
 	// single-channel; remapped here into something visually meaningful in
 	// an 8-bit RGB channel rather than shown as a raw, mostly-black/white
 	// unbounded value.
-	void FillNormalAov(const std::vector<Mirage::Color> &normal, std::vector<float> &outChannels)
+	// width/height-aware and flip rows bottom-up on the way out - see
+	// PushPixelsToRenderView's comment for why: MRenderView expects
+	// bottom-to-top scanlines, Mirage's own buffers are top-down.
+	void FillNormalAov(const std::vector<Mirage::Color> &normal, std::vector<float> &outChannels, int width, int height)
 	{
 		outChannels.resize(normal.size() * 3);
-		for (size_t i = 0; i < normal.size(); ++i)
+		for (int y = 0; y < height; ++y)
 		{
-			// [-1,1] -> [0,1], the standard normal-visualization convention.
-			outChannels[i * 3 + 0] = normal[i].x * 0.5f + 0.5f;
-			outChannels[i * 3 + 1] = normal[i].y * 0.5f + 0.5f;
-			outChannels[i * 3 + 2] = normal[i].z * 0.5f + 0.5f;
+			const size_t srcRowStart = static_cast<size_t>(y) * width;
+			const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
+			for (int x = 0; x < width; ++x)
+			{
+				// [-1,1] -> [0,1], the standard normal-visualization convention.
+				const Mirage::Color &n = normal[srcRowStart + x];
+				const size_t dst = (dstRowStart + x) * 3;
+				outChannels[dst + 0] = n.x * 0.5f + 0.5f;
+				outChannels[dst + 1] = n.y * 0.5f + 0.5f;
+				outChannels[dst + 2] = n.z * 0.5f + 0.5f;
+			}
 		}
 	}
 
-	void FillDepthAov(const std::vector<Mirage::Color> &depth, std::vector<float> &outChannels)
+	void FillDepthAov(const std::vector<Mirage::Color> &depth, std::vector<float> &outChannels, int width, int height)
 	{
 		outChannels.resize(depth.size());
-		for (size_t i = 0; i < depth.size(); ++i)
+		for (int y = 0; y < height; ++y)
 		{
-			// Depth is unbounded (miss = some large/inf sentinel) - a cheap
-			// reciprocal compression into [0,1] for visualization purposes,
-			// not a calibrated/linear depth channel.
-			const float d = depth[i].x;
-			outChannels[i] = 1.0f / (1.0f + std::max(d, 0.0f));
+			const size_t srcRowStart = static_cast<size_t>(y) * width;
+			const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
+			for (int x = 0; x < width; ++x)
+			{
+				// Depth is unbounded (miss = some large/inf sentinel) - a cheap
+				// reciprocal compression into [0,1] for visualization purposes,
+				// not a calibrated/linear depth channel.
+				const float d = depth[srcRowStart + x].x;
+				outChannels[dstRowStart + x] = 1.0f / (1.0f + std::max(d, 0.0f));
+			}
 		}
 	}
 
-	void FillPrimIdAov(const std::vector<Mirage::Color> &primId, std::vector<float> &outChannels)
+	void FillPrimIdAov(const std::vector<Mirage::Color> &primId, std::vector<float> &outChannels, int width, int height)
 	{
 		outChannels.resize(primId.size());
-		for (size_t i = 0; i < primId.size(); ++i)
+		for (int y = 0; y < height; ++y)
 		{
-			// primId.x is (float)Primitive::hydraId, -1 on miss (see
-			// mirage/core/Renderer.h). A real ID channel for compositing
-			// needs float/int precision this 8-bit-per-channel Render View
-			// path can't provide anyway - this is a debug visualization
-			// (arbitrary-looking but deterministic per-ID grayscale), not a
-			// precise ID AOV.
-			const int id = static_cast<int>(primId[i].x);
-			outChannels[i] = (id < 0) ? 0.0f : static_cast<float>((id * 2654435761u) % 256u) / 255.0f;
+			const size_t srcRowStart = static_cast<size_t>(y) * width;
+			const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
+			for (int x = 0; x < width; ++x)
+			{
+				// primId.x is (float)Primitive::hydraId, -1 on miss (see
+				// mirage/core/Renderer.h). A real ID channel for compositing
+				// needs float/int precision this 8-bit-per-channel Render View
+				// path can't provide anyway - this is a debug visualization
+				// (arbitrary-looking but deterministic per-ID grayscale), not a
+				// precise ID AOV.
+				const int id = static_cast<int>(primId[srcRowStart + x].x);
+				outChannels[dstRowStart + x] = (id < 0) ? 0.0f : static_cast<float>((id * 2654435761u) % 256u) / 255.0f;
+			}
 		}
 	}
 }
@@ -292,17 +328,17 @@ void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, u
 
 	if ((aovMask & Mirage::kAovDepth) && !depth.empty())
 	{
-		FillDepthAov(depth, depthChannels);
+		FillDepthAov(depth, depthChannels, m_options.width, m_options.height);
 		aovs.push_back(RV_AOV{1, MString("depth"), depthChannels.data()});
 	}
 	if ((aovMask & Mirage::kAovNormal) && !normal.empty())
 	{
-		FillNormalAov(normal, normalChannels);
+		FillNormalAov(normal, normalChannels, m_options.width, m_options.height);
 		aovs.push_back(RV_AOV{3, MString("normal"), normalChannels.data()});
 	}
 	if ((aovMask & Mirage::kAovPrimId) && !primId.empty())
 	{
-		FillPrimIdAov(primId, primIdChannels);
+		FillPrimIdAov(primId, primIdChannels, m_options.width, m_options.height);
 		aovs.push_back(RV_AOV{1, MString("primId"), primIdChannels.data()});
 	}
 
@@ -320,15 +356,22 @@ void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, u
 	if (pixelSnapshot.empty())
 		return;
 
+	// Same bottom-up flip as PushPixelsToRenderView - see its comment.
 	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 	std::vector<RV_PIXEL> outPixels(pixelSnapshot.size());
-	for (size_t i = 0; i < pixelSnapshot.size(); ++i)
+	for (int y = 0; y < m_options.height; ++y)
 	{
-		Mirage::Color resolved = ResolveBackendPixel(pixelSnapshot[i], isGpu);
-		outPixels[i].r = resolved.x * 255.0f;
-		outPixels[i].g = resolved.y * 255.0f;
-		outPixels[i].b = resolved.z * 255.0f;
-		outPixels[i].a = 255.0f;
+		const size_t srcRowStart = static_cast<size_t>(y) * m_options.width;
+		const size_t dstRowStart = static_cast<size_t>(m_options.height - 1 - y) * m_options.width;
+		for (int x = 0; x < m_options.width; ++x)
+		{
+			Mirage::Color resolved = ResolveBackendPixel(pixelSnapshot[srcRowStart + x], isGpu);
+			RV_PIXEL &out = outPixels[dstRowStart + x];
+			out.r = resolved.x * 255.0f;
+			out.g = resolved.y * 255.0f;
+			out.b = resolved.z * 255.0f;
+			out.a = 255.0f;
+		}
 	}
 
 	MRenderView::updatePixels(left, right, bottom, top, outPixels.data(), false,
