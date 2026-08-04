@@ -21,6 +21,18 @@ public:
 
 	static Mirage::Options getRenderOptions();
 
+	// Sane, non-zero fallback used both to seed the node's own attribute
+	// defaults (initialize()) and as what getRenderOptions() returns when
+	// "defaultMirageRenderGlobals" doesn't exist yet (e.g. a render kicked
+	// off before Render Settings' Mirage tab has ever been opened, which is
+	// what actually creates the node - see MirageMaya/globals.py's
+	// create_render_globals_node()). Mirage::Options has no default member
+	// initializers, so returning a bare `Mirage::Options()`/`Options{}` here
+	// previously meant maxSamples == 0 - the render loop's
+	// `samples < maxSamples` condition is false before it ever starts, so
+	// the Render View gets a single all-black frame with no error at all.
+	static Mirage::Options DefaultOptions();
+
 	// Global calibration knob for the emissive-primitive light
 	// approximations LightTranslator builds for point/spot/directional
 	// lights - Mirage has no native photometric unit system for them (see
