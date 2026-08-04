@@ -146,6 +146,19 @@ void RenderProcedure::initRender(MString camera)
 	m_session->scene.Clear();
 
 	buildScene(camera);
+
+	// buildScene() just did a full DAG re-traversal into a freshly-cleared
+	// Mirage::Scene - there's no incremental diffing here, every render
+	// rebuilds the whole scene from scratch. But RenderSession::PrepareRenderer()
+	// only recreates the actual Renderer backend when it sees the session
+	// marked structurally dirty (see RenderSession.h) - without this call,
+	// nothing ever set that flag, so PrepareRenderer() kept reusing the
+	// Renderer instance built from the *first* render's scene forever
+	// (VulkanRenderer uploads geometry once, at construction, and the CPU
+	// backend is likewise built once against that first scene). Any object
+	// added/removed/etc. after the first render would update m_session->scene
+	// correctly but never reach the renderer that actually produces pixels.
+	m_session->MarkSceneStructurallyDirty();
 }
 
 void RenderProcedure::render()
