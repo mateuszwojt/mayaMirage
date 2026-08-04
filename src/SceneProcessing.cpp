@@ -33,11 +33,15 @@ void RenderProcedure::translateCamera(MString cameraName)
 	std::cout << "\tCamera rotation : " << m_Camera.rotation.x << ", " << m_Camera.rotation.y << ", " << m_Camera.rotation.z << ", " << m_Camera.rotation.w << std::endl;
 
 	// set camera FOV
-	double focalLength = camera.focalLength();
-	std::cout << "\tCamera focal length : " << focalLength << std::endl;
-	double horizAperture = camera.horizontalFilmAperture() * 25.4f;
-	std::cout << "\tCamera horizontal aperture : " << horizAperture << std::endl;
-	float fov = 2.0f * std::atan((horizAperture / 2.0f) / focalLength);
+	// Mirage::Camera::fov is the *vertical* full-angle FOV (see
+	// CameraSampler in mirage/utils/Util.h, which uses it unmodified for the
+	// vertical screen scale and derives the horizontal scale from it via the
+	// aspect ratio - the same convention as gluPerspective's fovy). Use
+	// MFnCamera::verticalFieldOfView() directly rather than deriving it by
+	// hand from horizontal film aperture, since that also correctly accounts
+	// for film fit, overscan, lens squeeze ratio and camera scale.
+	MStatus status;
+	float fov = camera.verticalFieldOfView(&status);
 	m_Camera.fov = fov;
 	std::cout << "\tCamera FOV : " << m_Camera.fov << std::endl;
 
