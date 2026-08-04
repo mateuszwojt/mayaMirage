@@ -12,6 +12,17 @@ public:
 	static const MString name;
 	static const MTypeId id;
 
+	// The single render-globals node *instance*'s name, as created by
+	// MirageMaya/globals.py's create_render_globals_node() (and referenced by
+	// every attrFieldSliderGrp/attrEnumOptionMenuGrp/addControl binding in
+	// globals.py and ae_template.py) - NOT the same thing as `name` above,
+	// which is the node *type* passed to MFnPlugin::registerNode() and used
+	// to createNode() an instance of this class in the first place. There is
+	// normally no node in the scene literally named "MirageRendererGlobalsNode".
+	// All of the getters below (and clean()) need to look up the instance,
+	// not the type, so they must use this, not `name`.
+	static const MString kInstanceName;
+
 	static void *creator();
 	static MStatus initialize();
 

@@ -14,6 +14,7 @@
 
 const MString RenderGlobalsNode::name("MirageRendererGlobalsNode");
 const MTypeId RenderGlobalsNode::id(0x3ffff);
+const MString RenderGlobalsNode::kInstanceName("defaultMirageRenderGlobals");
 
 MObject RenderGlobalsNode::gRenderType;
 MObject RenderGlobalsNode::gRenderMode;
@@ -210,7 +211,7 @@ void RenderGlobalsNode::clean()
 	// The real target is the single "defaultMirageRenderGlobals" node
 	// instance itself.
 	MObject mObj;
-	MStatus status = getDependencyNodeByName(RenderGlobalsNode::name, mObj);
+	MStatus status = getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj);
 	if (status != MS::kSuccess || mObj.isNull())
 		return;
 
@@ -236,7 +237,7 @@ Mirage::Options RenderGlobalsNode::getRenderOptions()
 	// produced one all-black frame instead of erroring.
 	Mirage::Options opts = DefaultOptions();
 
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 	{
 		return opts;
 	}
@@ -285,7 +286,7 @@ Mirage::Options RenderGlobalsNode::getRenderOptions()
 float RenderGlobalsNode::getLightIntensityScale()
 {
 	MObject mObj;
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 		return 1.0f;
 
 	float scale = 1.0f;
@@ -297,7 +298,7 @@ float RenderGlobalsNode::getLightIntensityScale()
 uint32_t RenderGlobalsNode::getAovMask()
 {
 	MObject mObj;
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 		return 0;
 
 	uint32_t mask = 0;
@@ -326,7 +327,7 @@ uint32_t RenderGlobalsNode::getAovMask()
 ImageOutputFormat RenderGlobalsNode::getOutputImageFormat()
 {
 	MObject mObj;
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 		return ImageOutputFormat::ePng;
 
 	int format = 0;
@@ -349,7 +350,7 @@ ImageOutputFormat RenderGlobalsNode::getOutputImageFormat()
 bool RenderGlobalsNode::getEnableInstancing()
 {
 	MObject mObj;
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 		return true;
 
 	bool enabled = true;
@@ -363,7 +364,7 @@ RenderGlobalsNode::MotionBlurSettings RenderGlobalsNode::getMotionBlurSettings()
 	MotionBlurSettings settings{false, -0.25, 0.25};
 
 	MObject mObj;
-	if (getDependencyNodeByName(RenderGlobalsNode::name, mObj) != MS::kSuccess)
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
 		return settings;
 
 	MPlug pEnabled(mObj, gMotionBlurEnabled);
