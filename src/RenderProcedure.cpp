@@ -58,9 +58,20 @@ MStatus RenderProcedure::doIt(const MArgList &args)
 	m_renderOptions = RenderGlobalsNode::getRenderOptions();
 	m_renderOptions.width = width;
 	m_renderOptions.height = height;
-	m_renderOptions.clamp = FLT_MAX;
 	// maxDepth now comes from RenderGlobalsNode::getRenderOptions() (a real,
 	// user-editable render-globals attribute) rather than being hardcoded.
+	//
+	// clamp is deliberately NOT overridden here (this used to hardcode it to
+	// FLT_MAX, i.e. no clamping at all) - getRenderOptions() already seeds it
+	// from DefaultOptions()'s clamp = 10.0f (there's no user-facing "clamp"
+	// attribute on RenderGlobalsNode yet to override it with anyway). The
+	// CPU backend accumulates additively across samples and divides by
+	// sample count at display time, so an unclamped firefly/near-singular
+	// sample that blows up to Inf/NaN at a given pixel poisons that pixel's
+	// running average permanently - with FLT_MAX, more samples just meant
+	// more chances for some pixel to get hit, so the image visibly degraded
+	// (progressively darker/noisier, never recovering) the longer a render
+	// ran, instead of cleanly converging like a path tracer should.
 
 	// Cancel any render already in flight and wait for its worker thread /
 	// idle callback to fully tear down before touching the shared scene -
@@ -101,7 +112,25 @@ void RenderProcedure::preRender()
 	// renderType (CPU/GPU) setting exposed (but never consulted) on
 	// RenderGlobalsNode.
 	bool recreated = false;
-	m_session->PrepareRenderer(m_renderOptions.type, m_renderOptions.width, m_renderOptions.height, recreated);
+	Mirage::Renderer *renderer = m_session->PrepareRenderer(m_renderOptions.type, m_renderOptions.width, m_renderOptions.height, recreated);
+
+	// Every render kicked off from here (a fresh "Render" click / batch
+	// frame) is meant to be an independent, from-scratch progressive
+	// sequence - RenderWorker resets its own CPU-side output buffer to zero
+	// at the start of every StartRender() call, so the CPU backend (which
+	// accumulates entirely into that caller-owned buffer) already restarts
+	// cleanly on its own. The GPU (Vulkan) backend does not: it keeps its
+	// own persistent accumulation buffer alive *inside the Renderer object*
+	// across calls (see RenderWorker::ResolveBackendPixel's comment), and
+	// PrepareRenderer() only recreates that object when something
+	// structural actually changed (backend/dimensions/scene version) - a
+	// second click with identical settings reuses the same instance and its
+	// stale, already-converged accumulation. Without this, each subsequent
+	// GPU render blends new samples on top of the *previous* render's
+	// result instead of starting over, getting brighter every click until
+	// it clips to solid white. Safe to call unconditionally even right
+	// after a recreate (a fresh Renderer has nothing to reset).
+	renderer->ResetAccumulation();
 }
 
 void RenderProcedure::initRender(MString camera)
