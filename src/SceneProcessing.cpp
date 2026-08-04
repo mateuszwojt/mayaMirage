@@ -53,13 +53,27 @@ void RenderProcedure::translateCamera(MString cameraName)
 	// Mirage::Camera::fov is the *vertical* full-angle FOV (see
 	// CameraSampler in mirage/utils/Util.h, which uses it unmodified for the
 	// vertical screen scale and derives the horizontal scale from it via the
-	// aspect ratio - the same convention as gluPerspective's fovy). Use
-	// MFnCamera::verticalFieldOfView() directly rather than deriving it by
-	// hand from horizontal film aperture, since that also correctly accounts
-	// for film fit, overscan, lens squeeze ratio and camera scale.
-	MStatus status;
-	float fov = camera.verticalFieldOfView(&status);
-	m_Camera.fov = fov;
+	// aspect ratio - the same convention as gluPerspective's fovy).
+	//
+	// MFnCamera::verticalFieldOfView() is computed purely from the camera
+	// node's own intrinsic properties (focal length, film aperture, lens
+	// squeeze ratio, camera scale) - it has no width/height parameters, so
+	// it cannot know (and does not account for) the aspect ratio of the
+	// actual render/port we're rendering into. Maya's Film Fit mode (Fill/
+	// Horizontal/Vertical/Overscan) is specifically about reconciling the
+	// camera's own film-back aspect ratio against a differently-aspected
+	// render resolution, and doing that correctly requires knowing that
+	// resolution - which is exactly what getPortFieldOfView(width, height,
+	// ...) takes. Using verticalFieldOfView() here meant the render FOV was
+	// only ever correct when the render resolution happened to match the
+	// camera's film-back aspect ratio; any mismatch (e.g. rendering at
+	// 960x540 with a camera whose film back doesn't natively work out to a
+	// 16:9 aspect) made the render systematically wider/narrower than what
+	// the Maya viewport (which does apply film fit against its own panel
+	// size) actually shows for the same camera.
+	double horizontalFOV = 0.0, verticalFOV = 0.0;
+	camera.getPortFieldOfView(m_renderOptions.width, m_renderOptions.height, horizontalFOV, verticalFOV);
+	m_Camera.fov = static_cast<float>(verticalFOV);
 	std::cout << "\tCamera FOV : " << m_Camera.fov << std::endl;
 
 	// set focal point and aperture
