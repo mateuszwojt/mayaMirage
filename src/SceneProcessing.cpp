@@ -3,6 +3,8 @@
 #include "translators/SceneTranslator.h"
 #include "translators/MayaTransformUtils.h"
 
+#include <cmath>
+
 #include <mirage/utils/Util.h>
 
 #include <maya/MDagPath.h>
@@ -55,24 +57,38 @@ void RenderProcedure::translateCamera(MString cameraName)
 	// vertical screen scale and derives the horizontal scale from it via the
 	// aspect ratio - the same convention as gluPerspective's fovy).
 	//
-	// MFnCamera::verticalFieldOfView() is computed purely from the camera
-	// node's own intrinsic properties (focal length, film aperture, lens
-	// squeeze ratio, camera scale) - it has no width/height parameters, so
-	// it cannot know (and does not account for) the aspect ratio of the
-	// actual render/port we're rendering into. Maya's Film Fit mode (Fill/
-	// Horizontal/Vertical/Overscan) is specifically about reconciling the
-	// camera's own film-back aspect ratio against a differently-aspected
-	// render resolution, and doing that correctly requires knowing that
-	// resolution - which is exactly what getPortFieldOfView(width, height,
-	// ...) takes. Using verticalFieldOfView() here meant the render FOV was
-	// only ever correct when the render resolution happened to match the
-	// camera's film-back aspect ratio; any mismatch (e.g. rendering at
-	// 960x540 with a camera whose film back doesn't natively work out to a
-	// 16:9 aspect) made the render systematically wider/narrower than what
-	// the Maya viewport (which does apply film fit against its own panel
-	// size) actually shows for the same camera.
-	double horizontalFOV = 0.0, verticalFOV = 0.0;
-	camera.getPortFieldOfView(m_renderOptions.width, m_renderOptions.height, horizontalFOV, verticalFOV);
+	// This used to go through MFnCamera::getPortFieldOfView(width, height,
+	// ...), which correctly applies Film Fit (Fill/Horizontal/Vertical) for
+	// the given render resolution - but *also* unconditionally bakes in the
+	// camera's Overscan attribute, with no way to opt out. Overscan is a
+	// viewport-only staging aid ("allows us to choreograph action outside of
+	// the frustum... without having to resort to a dolly or zoom" - see
+	// MFnCamera::FilmFit's own doc comment) - it's not meant to affect the
+	// actual rendered frame in any production renderer, but
+	// getPortFieldOfView() has no way to exclude it. Confirmed against a
+	// real scene with Overscan = 1.3: getPortFieldOfView() returned a
+	// vertical FOV of 0.719419 rad, ~28% wider than the correct
+	// Film-Fit-only value of 0.563197 rad - exactly the "render wider than
+	// the viewport" mismatch reported, since Maya's own gate-masked viewport
+	// does not bake overscan into what it shows as the actual output frame
+	// either.
+	//
+	// MFnCamera::getRenderingFrustum(windowAspect, left, right, bottom, top)
+	// is the correct function for this: confirmed (by comparing its output
+	// against getViewingFrustum() with applyOverscan/applySqueeze/
+	// applyPanZoom all explicitly false) that it applies Film Fit the same
+	// way getPortFieldOfView() does but deliberately excludes overscan and
+	// 2D pan/zoom (both interactive-viewport-only, like overscan) - matching
+	// what should actually end up in a rendered frame. Its extents are
+	// physical values at the camera's near clip plane, not normalized
+	// tan(halfAngle) values, so nearClippingPlane() is needed to recover the
+	// angle.
+	const double renderAspect = double(m_renderOptions.width) / m_renderOptions.height;
+	double left = 0.0, right = 0.0, bottom = 0.0, top = 0.0;
+	camera.getRenderingFrustum(renderAspect, left, right, bottom, top);
+
+	const double nearClip = camera.nearClippingPlane();
+	const double verticalFOV = (nearClip != 0.0) ? 2.0 * std::atan(top / nearClip) : 0.0;
 	m_Camera.fov = static_cast<float>(verticalFOV);
 	std::cout << "\tCamera FOV : " << m_Camera.fov << std::endl;
 
