@@ -2,6 +2,7 @@
 #include "MeshTranslator.h"
 #include "MaterialTranslator.h"
 #include "LightTranslator.h"
+#include "InstancerTranslator.h"
 
 #include <unordered_set>
 
@@ -72,6 +73,21 @@ void SceneTranslator::Translate(Mirage::Scene &scene, float lightIntensityScale,
 			MDagPath path;
 			it.getPath(path);
 			lightTranslator.Translate(path);
+		}
+		else if (type == MFn::kInstancer)
+		{
+			// MASH's Instancer node and nParticle instancing both create a
+			// plain "instancer" DAG node - translated via Mirage v1.1.0's
+			// procedural point-instancer (Mirage::PointInstancer) rather
+			// than MeshTranslator's per-DAG-instance baking, since a
+			// particle instancer's "instances" aren't DAG instances at all
+			// (see InstancerTranslator.h). Its prototype geometry is
+			// translated directly by InstancerTranslator, not by the
+			// kMesh branch above, so no dedup-by-shape bookkeeping is
+			// needed here the way it is for ordinary meshes.
+			MDagPath path;
+			it.getPath(path);
+			InstancerTranslator::Translate(path, scene, materialTranslator, motionBlur);
 		}
 	}
 

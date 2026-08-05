@@ -16,13 +16,12 @@
 //
 // Mirage::Material is a fixed Disney-principled-BSDF field set with no
 // mechanism for host-supplied/custom shading graphs - only what maps onto
-// that fixed set gets translated. Two things are explicitly untranslatable
-// and are flagged (once per scene, not per-material, to avoid log spam)
-// rather than silently ignored: opacity/cutout transparency (no field on
-// Mirage::Material at all) and bump/normal mapping (Material::bump/bumpTile
-// exist but whether they're actually wired into shading is unverified in
-// the current renderer - not worth building a translation path onto an
-// unconfirmed feature).
+// that fixed set gets translated. As of Mirage v1.1.0 both opacity/cutout
+// transparency (Material::opacity/opacityTextureIndex) and tangent-space
+// normal mapping (Material::normalTextureIndex, fed via a standard
+// file->bump2d->normalCamera network) have real fields and are translated
+// below - previously both were untranslatable and only flagged with a
+// once-per-scene warning.
 class MaterialTranslator
 {
 public:
@@ -37,7 +36,6 @@ public:
 
 private:
 	Mirage::Scene &m_scene;
-	bool m_warnedAboutOpacity = false;
 	// Keyed by shading-engine name (or the placeholder key for an
 	// unassigned face) - avoids re-translating (and re-loading any
 	// connected textures for) the same shading engine every time another
@@ -55,5 +53,11 @@ private:
 	// plug isn't texture-connected, or the file couldn't be loaded).
 	int ResolveFileTexture(const MPlug &plug, Mirage::TextureColorSpace colorSpace);
 
-	void WarnAboutOpacityOnce();
+	// Resolves a shader's `normalCamera`-style input plug through the
+	// standard Maya file -> bump2d -> shader network to a tangent-space
+	// normal map texture index. Only bump2d nodes set to "Tangent Space
+	// Normals" (bumpInterp == 1) are translated - plain height-field bump
+	// (bumpInterp == 0) has no Mirage::Material field to map onto and is
+	// left unset, same as an unconnected plug (-1, safe no-op).
+	int ResolveNormalMapTexture(const MPlug &plug);
 };

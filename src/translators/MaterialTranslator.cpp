@@ -138,15 +138,19 @@ std::unique_ptr<Mirage::Material> MaterialTranslator::TranslateStandardSurface(c
 	const float ior = surf.specularIOR();
 	material->eta = (ior > 0.0f) ? ior : 0.0f; // 0 => Material::GetIndexOfRefraction() infers from `specular`
 
-	const MColor opacity = surf.opacity();
-	if (opacity.r < 0.999f || opacity.g < 0.999f || opacity.b < 0.999f)
-	{
-		WarnAboutOpacityOnce();
-	}
+	// Opacity: Mirage's opacity is a single cutout scalar (1.0 = fully
+	// opaque, see Material.h); standardSurface's `opacity` attribute is an
+	// RGB tint, so use its luminance as the scalar default. A connected
+	// `file` texture (its alpha channel, sampled per-hit) overrides the
+	// scalar, same priority convention as the albedo/roughness/metallic
+	// slots below.
+	const MColor opacityColor = surf.opacity();
+	material->opacity = (opacityColor.r + opacityColor.g + opacityColor.b) / 3.0f;
 
-	// Textures: only the three channels Mirage::Material has a texture slot
-	// for at all (albedo/roughness/metallic). baseColor/specularColor
-	// connections are color data (sRGB-decoded); roughness/metalness
+	// Textures: only the four channels Mirage::Material has a texture slot
+	// for at all (albedo/roughness/metallic/opacity), plus normalCamera's
+	// own bump2d-mediated network below. baseColor/specularColor
+	// connections are color data (sRGB-decoded); roughness/metalness/opacity
 	// connections are non-color data (must stay linear) - matches
 	// TextureColorSpace's documented UsdPreviewSurface-style convention.
 	int albedoTex = ResolveFileTexture(shaderFn.findPlug("baseColor", false), Mirage::TextureColorSpace::eSRGB);
@@ -160,6 +164,14 @@ std::unique_ptr<Mirage::Material> MaterialTranslator::TranslateStandardSurface(c
 	int metallicTex = ResolveFileTexture(shaderFn.findPlug("metalness", false), Mirage::TextureColorSpace::eLinear);
 	if (metallicTex >= 0)
 		material->metallicTextureIndex = metallicTex;
+
+	int opacityTex = ResolveFileTexture(shaderFn.findPlug("opacity", false), Mirage::TextureColorSpace::eLinear);
+	if (opacityTex >= 0)
+		material->opacityTextureIndex = opacityTex;
+
+	int normalTex = ResolveNormalMapTexture(shaderFn.findPlug("normalCamera", false));
+	if (normalTex >= 0)
+		material->normalTextureIndex = normalTex;
 
 	return material;
 }
@@ -176,11 +188,12 @@ std::unique_ptr<Mirage::Material> MaterialTranslator::TranslateLegacyShader(cons
 	const MColor color = lambert.color();
 	material->color = Mirage::Vec3(color.r, color.g, color.b);
 
+	// Same luminance-of-tint-color approach as TranslateStandardSurface's
+	// opacity handling above, just starting from `transparency` (1 =
+	// fully transparent) rather than an `opacity` attribute directly.
 	const MColor transparency = lambert.transparency();
-	if (transparency.r > 0.001f || transparency.g > 0.001f || transparency.b > 0.001f)
-	{
-		WarnAboutOpacityOnce();
-	}
+	const float transparencyLuminance = (transparency.r + transparency.g + transparency.b) / 3.0f;
+	material->opacity = std::max(0.0f, 1.0f - transparencyLuminance);
 
 	const MString typeName = shaderFn.typeName();
 	if (typeName == "phong" || typeName == "phongE")
@@ -253,12 +266,33 @@ int MaterialTranslator::ResolveFileTexture(const MPlug &plug, Mirage::TextureCol
 	return m_scene.FindOrAddTexture(path, std::move(texture));
 }
 
-void MaterialTranslator::WarnAboutOpacityOnce()
+int MaterialTranslator::ResolveNormalMapTexture(const MPlug &plug)
 {
-	if (m_warnedAboutOpacity)
-		return;
-	m_warnedAboutOpacity = true;
-	MGlobal::displayWarning(
-		"Mirage: one or more materials have non-opaque opacity/transparency, which Mirage::Material "
-		"has no field for - all geometry will render fully opaque.");
+	if (plug.isNull() || !plug.isConnected())
+		return -1;
+
+	MPlugArray connections;
+	plug.connectedTo(connections, true, false);
+	if (connections.length() == 0)
+		return -1;
+
+	const MObject bumpNode = connections[0].node();
+	if (!bumpNode.hasFn(MFn::kBump))
+		return -1; // only the standard file->bump2d->shader network is supported
+
+	MFnDependencyNode bumpFn(bumpNode);
+
+	// bump2d's `bumpInterp` attribute: 0 = "Bump" (height-field, no
+	// Mirage::Material field to map onto), 1 = "Tangent Space Normals"
+	// (exactly what Material::normalTextureIndex expects), 2 = "Object
+	// Space Normals" (not tangent-space, also not representable). Only
+	// mode 1 is translated.
+	MPlug interpPlug = bumpFn.findPlug("bumpInterp", false);
+	int interp = 0;
+	if (!interpPlug.isNull())
+		interpPlug.getValue(interp);
+	if (interp != 1)
+		return -1;
+
+	return ResolveFileTexture(bumpFn.findPlug("bumpValue", false), Mirage::TextureColorSpace::eLinear);
 }

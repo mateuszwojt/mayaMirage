@@ -168,15 +168,16 @@ MStatus RenderGlobalsNode::initialize()
 	CHECK_MSTATUS(status);
 	addAttribute(gEnablePrimIdAOV);
 
-	// PNG/JPG/BMP/TGA only - matches what ImageWriter can actually produce
-	// (the only image writer anywhere in the Mirage codebase family is an
-	// 8-bit-only vendored stb_image_write.h), not Maya's full format list.
+	// PNG/JPG/BMP/TGA (8-bit, via vendored stb_image_write.h) plus, as of
+	// Mirage v1.1.0, EXR (32-bit float, via vendored tinyexr.h) - matches
+	// what ImageWriter can actually produce, not Maya's full format list.
 	gOutputImageFormat = eAttr.create("outputImageFormat", "outputImageFormat", 0, &status);
 	CHECK_MSTATUS(status);
 	eAttr.addField("PNG", 0);
 	eAttr.addField("JPG", 1);
 	eAttr.addField("BMP", 2);
 	eAttr.addField("TGA", 3);
+	eAttr.addField("EXR", 4);
 	addAttribute(gOutputImageFormat);
 
 	gEnableInstancing = numAttr.create("enableInstancing", "enableInstancing", MFnNumericData::kBoolean, true, &status);
@@ -342,6 +343,8 @@ ImageOutputFormat RenderGlobalsNode::getOutputImageFormat()
 		return ImageOutputFormat::eBmp;
 	case 3:
 		return ImageOutputFormat::eTga;
+	case 4:
+		return ImageOutputFormat::eExr;
 	default:
 		return ImageOutputFormat::ePng;
 	}
