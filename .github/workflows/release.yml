@@ -1,0 +1,41 @@
+name: Release
+
+# Builds and publishes MirageMaya for every {macos-arm64, linux-x86_64} x
+# {maya2026, maya2027} combination whenever a vX.Y.Z tag is pushed.
+#
+# NOTE: the linux-x86_64 legs currently fail at the devkit-fetch step (no
+# Linux Maya devkit has been uploaded to the private devkit store yet - see
+# README.md's "CI / Releases" section), so until that's done this release
+# will only actually contain the two macOS assets.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/*.zip

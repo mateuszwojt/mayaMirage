@@ -1,13 +1,13 @@
 # Mirage Maya Plugin
 
-A Maya integration for the [Mirage](https://github.com/mateuszwojt/Mirage) path tracer, targeting **Maya 2026/2027** on **macOS (Apple Silicon)** and Mirage's Slang/Vulkan (and CPU) renderer backends.
+A Maya integration for the [Mirage](https://github.com/mateuszwojt/Mirage) path tracer, targeting **Maya 2026/2027** on **macOS (Apple Silicon) and Linux (x86_64)** and Mirage's Slang/Vulkan (and CPU) renderer backends.
 
 The plugin registers Mirage as a classic Maya renderer (`Render > Render Current Frame`, `Render Settings`, and batch rendering via `Render`/`mayabatch`), with a progressive, cancellable Render View, real Maya scene translation (materials, lights, instancing, motion blur), AOVs, and file output.
 
 ## Requirements
 
 - Maya 2026 or 2027, with the standalone Maya devkit package extracted somewhere on disk (Maya 2023+ no longer bundles the devkit inside the application install).
-- macOS on Apple Silicon — Mirage's GPU backend (Slang shaders via slang-rhi/MoltenVK) only builds and runs on macOS.
+- macOS on Apple Silicon, or Linux (x86_64) — Mirage's GPU backend (Slang shaders via slang-rhi, native Vulkan on Linux / MoltenVK on macOS) builds and runs on both. Windows and macOS Intel aren't supported.
 - A built and installed [`mirage`](../mirage) (the `find_package(Mirage CONFIG)` package under `mirage/install/`).
 
 ## Building
@@ -22,6 +22,20 @@ cmake --build build -j
 ```
 
 `DEVKIT_LOCATION` (or the `MAYA_DEVKIT_ROOT` CMake cache variable) points at the extracted Maya devkit; `Mirage_DIR` points at Mirage's installed CMake package. Installing (`cmake --install build`) copies the built plugin and `scripts/MirageMaya` into Maya's per-user plug-ins/scripts directories.
+
+## CI / Releases
+
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the plugin for every `{macos-arm64, linux-x86_64} x {maya2026, maya2027}` combination:
+
+- [`ci.yml`](.github/workflows/ci.yml) runs it on every push/PR to `main` as a compile check (nothing is published).
+- [`release.yml`](.github/workflows/release.yml) runs it when a `vX.Y.Z` tag is pushed, then attaches the built `MirageMaya-<tag>-maya<version>-<os>-<arch>.zip` archives (each containing `plug-ins/MirageMaya.{bundle,so}` and `scripts/MirageMaya/`) to a GitHub Release for that tag.
+
+Two dependencies are fetched at build time rather than checked in:
+
+- **Mirage** — a public, prebuilt install tarball is downloaded from [Mirage's own GitHub Releases](https://github.com/mateuszwojt/Mirage/releases), pinned to the version named in the checked-in [`MIRAGE_VERSION`](MIRAGE_VERSION) file. Bump that file (and open a PR) to pick up a newer Mirage.
+- **The Maya devkit** — proprietary, so it isn't fetchable from a public URL. Archives (`devkit-maya<version>-<os>-<arch>.tar.gz`) are expected as Release assets in a private `mateuszwojt/maya-devkits` repo, downloaded via `gh release download` using the `MAYA_DEVKIT_PAT` repo secret (a fine-grained PAT with read access to that repo's releases).
+
+**Known gap:** no Linux Maya devkit has been uploaded to that private store yet, so the `linux-x86_64` legs currently fail at the devkit-fetch step (the workflow tolerates this — `continue-on-error` on the Linux matrix legs — so it doesn't block CI/releases on macOS). Once a Linux devkit archive is uploaded there, the Linux legs will build without any workflow changes; remove the `continue-on-error` line in `build.yml` at that point.
 
 ## Usage
 
