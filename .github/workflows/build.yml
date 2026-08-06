@@ -2,7 +2,7 @@ name: Build
 
 # Reusable matrix build shared by ci.yml (validation) and release.yml
 # (publishing). See README.md's "CI / Releases" section for the secrets this
-# expects and the current known gap (no Linux Maya devkit uploaded yet).
+# expects.
 
 on:
   workflow_call:
@@ -35,33 +35,28 @@ jobs:
             runner: macos-14
             plugin_ext: .bundle
             mirage_os_arch: macos-arm64
-            devkit_asset: devkit-maya2026-macos-arm64.tar.gz
+            devkit_asset: Autodesk_Maya_2026_DEVKIT_Mac.dmg
           - maya_version: "2027"
             os: macos
             arch: arm64
             runner: macos-14
             plugin_ext: .bundle
             mirage_os_arch: macos-arm64
-            devkit_asset: devkit-maya2027-macos-arm64.tar.gz
+            devkit_asset: Autodesk_Maya_2027_DEVKIT_Mac.dmg
           - maya_version: "2026"
             os: linux
             arch: x86_64
             runner: ubuntu-24.04
             plugin_ext: .so
             mirage_os_arch: linux-x86_64
-            devkit_asset: devkit-maya2026-linux-x86_64.tar.gz
+            devkit_asset: Autodesk_Maya_2026_DEVKIT_Linux.tgz
           - maya_version: "2027"
             os: linux
             arch: x86_64
             runner: ubuntu-24.04
             plugin_ext: .so
             mirage_os_arch: linux-x86_64
-            devkit_asset: devkit-maya2027-linux-x86_64.tar.gz
-    # TEMPORARY: no Linux Maya devkit has been uploaded to the private devkit
-    # store yet (see README.md), so the linux-x86_64 legs are expected to
-    # fail at the "Fetch Maya devkit" step. Don't let that fail the overall
-    # check until a Linux devkit is added - remove this once it is.
-    continue-on-error: ${{ matrix.os == 'linux' }}
+            devkit_asset: Autodesk_Maya_2027_DEVKIT_Linux.tgz
     steps:
       - uses: actions/checkout@v4
 
@@ -86,19 +81,59 @@ jobs:
           sudo apt-get install -y libvulkan-dev libx11-dev libxrandr-dev
 
       # Maya devkit archives are proprietary Autodesk downloads and are not
-      # publicly fetchable. They're stored as Release assets in a private
-      # GitHub repo, pulled here via a fine-grained PAT (MAYA_DEVKIT_PAT).
+      # publicly fetchable. They're stored, under Autodesk's own download
+      # names, as assets on the `devkits` release in a private GitHub repo,
+      # pulled here via a fine-grained PAT (MAYA_DEVKIT_PAT). The macOS asset
+      # is a .dmg disk image; Linux's is a plain .tgz. Neither archive's
+      # internal layout is assumed - both are searched for wherever
+      # include/maya/MFn.h actually ends up, since Autodesk wraps the devkit
+      # in an inner folder whose name isn't guaranteed to be "devkitBase".
       - name: Fetch Maya devkit
         env:
           GH_TOKEN: ${{ secrets.MAYA_DEVKIT_PAT }}
         run: |
-          mkdir -p "${{ runner.temp }}/devkit"
-          gh release download \
+          set -euo pipefail
+          download_dir="${{ runner.temp }}/devkit-download"
+          devkit_dir="${{ runner.temp }}/devkit"
+          mkdir -p "$download_dir" "$devkit_dir"
+
+          gh release download devkits \
             --repo mateuszwojt/maya-devkits \
             --pattern "${{ matrix.devkit_asset }}" \
-            --dir "${{ runner.temp }}"
-          tar -xzf "${{ runner.temp }}/${{ matrix.devkit_asset }}" -C "${{ runner.temp }}/devkit"
-          echo "DEVKIT_LOCATION=${{ runner.temp }}/devkit" >> "$GITHUB_ENV"
+            --dir "$download_dir"
+
+          asset="$download_dir/${{ matrix.devkit_asset }}"
+          mounted=""
+          case "$asset" in
+            *.dmg)
+              root="${{ runner.temp }}/devkit-mount"
+              hdiutil attach "$asset" -mountpoint "$root" -nobrowse -quiet
+              mounted="$root"
+              ;;
+            *.tgz|*.tar.gz)
+              root="${{ runner.temp }}/devkit-extract"
+              mkdir -p "$root"
+              tar -xzf "$asset" -C "$root"
+              ;;
+            *)
+              echo "::error::unrecognized Maya devkit archive type: $asset"
+              exit 1
+              ;;
+          esac
+
+          mfn_path="$(find "$root" -maxdepth 6 -type f -path '*/include/maya/MFn.h' -print -quit)"
+          if [ -z "$mfn_path" ]; then
+            echo "::error::could not locate include/maya/MFn.h under $root (unpacked from $asset)"
+            exit 1
+          fi
+          src="$(dirname "$(dirname "$(dirname "$mfn_path")")")"
+          cp -R "$src"/. "$devkit_dir"/
+
+          if [ -n "$mounted" ]; then
+            hdiutil detach "$mounted" -quiet
+          fi
+
+          echo "DEVKIT_LOCATION=$devkit_dir" >> "$GITHUB_ENV"
 
       # Mirage publishes public per-OS/arch install tarballs on its own
       # GitHub Releases; the exact version consumed here is pinned via the

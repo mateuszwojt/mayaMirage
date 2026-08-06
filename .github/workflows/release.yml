@@ -2,11 +2,6 @@ name: Release
 
 # Builds and publishes MirageMaya for every {macos-arm64, linux-x86_64} x
 # {maya2026, maya2027} combination whenever a vX.Y.Z tag is pushed.
-#
-# NOTE: the linux-x86_64 legs currently fail at the devkit-fetch step (no
-# Linux Maya devkit has been uploaded to the private devkit store yet - see
-# README.md's "CI / Releases" section), so until that's done this release
-# will only actually contain the two macOS assets.
 
 on:
   push:

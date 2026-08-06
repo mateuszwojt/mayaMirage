@@ -33,9 +33,7 @@ cmake --build build -j
 Two dependencies are fetched at build time rather than checked in:
 
 - **Mirage** — a public, prebuilt install tarball is downloaded from [Mirage's own GitHub Releases](https://github.com/mateuszwojt/Mirage/releases), pinned to the version named in the checked-in [`MIRAGE_VERSION`](MIRAGE_VERSION) file. Bump that file (and open a PR) to pick up a newer Mirage.
-- **The Maya devkit** — proprietary, so it isn't fetchable from a public URL. Archives (`devkit-maya<version>-<os>-<arch>.tar.gz`) are expected as Release assets in a private `mateuszwojt/maya-devkits` repo, downloaded via `gh release download` using the `MAYA_DEVKIT_PAT` repo secret (a fine-grained PAT with read access to that repo's releases).
-
-**Known gap:** no Linux Maya devkit has been uploaded to that private store yet, so the `linux-x86_64` legs currently fail at the devkit-fetch step (the workflow tolerates this — `continue-on-error` on the Linux matrix legs — so it doesn't block CI/releases on macOS). Once a Linux devkit archive is uploaded there, the Linux legs will build without any workflow changes; remove the `continue-on-error` line in `build.yml` at that point.
+- **The Maya devkit** — proprietary, so it isn't fetchable from a public URL. Autodesk's own downloads (`Autodesk_Maya_<version>_DEVKIT_{Mac.dmg,Linux.tgz}`) are uploaded as-is as assets on the `devkits` release in a private `mateuszwojt/maya-devkits` repo, downloaded via `gh release download` using the `MAYA_DEVKIT_PAT` repo secret (a fine-grained PAT with read access to that repo's releases). The macOS `.dmg` is mounted with `hdiutil`; both archive types are then searched for wherever `include/maya/MFn.h` actually lands, since Autodesk doesn't guarantee the same inner-folder name across archives.
 
 ## Usage
 
