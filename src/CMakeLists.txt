@@ -29,6 +29,7 @@ add_library(${PROJECT_NAME}
     translators/MeshTranslator.cpp
     translators/LightTranslator.cpp
     translators/InstancerTranslator.cpp
+    translators/UdimAtlas.cpp
     translators/SceneTranslator.cpp
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE ${MAYA_LIBRARIES} Mirage::Mirage)

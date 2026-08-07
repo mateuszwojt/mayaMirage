@@ -1,4 +1,5 @@
 #include "MaterialTranslator.h"
+#include "UdimAtlas.h"
 
 #include <algorithm>
 #include <cmath>
@@ -248,6 +249,36 @@ int MaterialTranslator::ResolveFileTexture(const MPlug &plug, Mirage::TextureCol
 
 	if (fileNode.isNull())
 		return -1; // connected to something other than a plain file texture (e.g. a procedural/layered network) - not supported
+
+	// uvTilingMode == 3 is Maya's "UDIM (Mari)" tiling mode - the file node
+	// references a whole tile set, not one file, so exactFileTextureName
+	// below (which resolves to one specific single-frame file) is the wrong
+	// API here. computedFileTextureNamePattern already gives the resolved
+	// path with the literal "<UDIM>" token in place of the tile number,
+	// exactly what LoadUdimAtlas (Mirage v1.2.0's UDIM support) expects.
+	MFnDependencyNode fileFn(fileNode);
+	MPlug uvTilingModePlug = fileFn.findPlug("uvTilingMode", false);
+	int uvTilingMode = 0;
+	if (!uvTilingModePlug.isNull())
+		uvTilingModePlug.getValue(uvTilingMode);
+
+	if (uvTilingMode == 3)
+	{
+		MPlug patternPlug = fileFn.findPlug("computedFileTextureNamePattern", false);
+		MString patternPath = patternPlug.isNull() ? MString() : patternPlug.asString();
+		if (patternPath.length() == 0)
+			return -1;
+
+		const std::string pattern = patternPath.asChar();
+		std::unique_ptr<Mirage::Texture> atlas = LoadUdimAtlas(pattern, colorSpace);
+		if (!atlas)
+		{
+			MGlobal::displayWarning(MString("Mirage: failed to load UDIM texture set '") + patternPath + "'.");
+			return -1;
+		}
+
+		return m_scene.FindOrAddTexture(pattern, std::move(atlas));
+	}
 
 	MStatus status;
 	MString resolvedPath = MRenderUtil::exactFileTextureName(fileNode, &status);

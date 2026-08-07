@@ -65,6 +65,29 @@ public:
 	// samples, only a whole object's rigid transform moving.
 	static MotionBlurSettings getMotionBlurSettings();
 
+	struct SkySettings
+	{
+		// false (default): Scene::sky stays the flat horizon/zenith gradient
+		// LightTranslator already builds from any MFnAmbientLight (or its
+		// dim neutral fallback). true: LightTranslator::FinalizeSky() bakes
+		// Mirage v1.2.0's analytic Preetham sky (see mirage/lights/Skylight.h)
+		// into an HDR probe instead, taking precedence over any ambient
+		// light. The sun direction is not a separate control here - it's
+		// derived automatically from the first directional light
+		// LightTranslator encounters (falling back to a fixed default angle
+		// if the scene has none), so enabling this reuses whatever "sun"
+		// the artist already placed rather than requiring a second,
+		// redundant direction control.
+		bool preetham;
+
+		// Standard Preetham atmospheric turbidity parameter - ~2 is a very
+		// clear sky, ~6-10 is hazy/overcast-tending. Only read when
+		// `preetham` is true.
+		float turbidity;
+	};
+
+	static SkySettings getSkySettings();
+
 	// Which of Mirage's AOVs (depth/normal/primId - all single-valued
 	// first-hit snapshots, not progressively accumulated like the beauty
 	// image, see mirage/core/Renderer.h) to request. Folded directly into
@@ -104,6 +127,8 @@ private:
     static MObject gEnablePrimIdAOV;
     static MObject gOutputImageFormat;
     static MObject gEnableInstancing;
+    static MObject gSkyType;
+    static MObject gSkyTurbidity;
 
 	static MObject gNLMWidth;
     static MObject gNLMFalloff;

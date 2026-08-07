@@ -17,7 +17,9 @@ public:
 	// magic number. `motionBlur` feeds MeshTranslator's rigid-transform
 	// motion blur (see MayaTransformUtils.h). `enableInstancing = false`
 	// forces MeshTranslator's always-bake fallback for every instance (see
-	// MeshTranslator.h).
+	// MeshTranslator.h). `preetham`/`turbidity` feed LightTranslator::
+	// FinalizeSky()'s Preetham-vs-gradient sky choice (see RenderGlobals.h's
+	// SkySettings).
 	static void Translate(Mirage::Scene &scene, float lightIntensityScale, const MotionBlurSettings &motionBlur,
-						   bool enableInstancing);
+						   bool enableInstancing, bool preetham, float turbidity);
 };
