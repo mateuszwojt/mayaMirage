@@ -45,9 +45,8 @@ namespace
 	// class writes. Mirrors mirage/tools/scene_renderer/SceneRenderer.cpp's
 	// own WriteExr() exactly, including writing a fully-opaque alpha
 	// channel rather than passing `pixel.w` through: `pixels[i].w` here is
-	// whatever raw accumulated-sample-weight value the CPU/GPU backend left
-	// in it (see RenderWorker::ResolveBackendPixel), not a real [0,1]
-	// coverage value.
+	// whatever internal value the CPU/GPU backend happens to leave in it,
+	// not a real [0,1] coverage value.
 	bool WriteExr(const std::string &path, const std::vector<Mirage::Color> &pixels, int width, int height)
 	{
 		std::vector<float> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);

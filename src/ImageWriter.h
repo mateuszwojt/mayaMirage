@@ -29,9 +29,10 @@ class ImageWriter
 public:
 	static const char *FormatExtension(ImageOutputFormat format);
 
-	// PNG/JPG/BMP/TGA: tonemaps `pixels` (already backend-resolved to
-	// linear radiance - see RenderWorker's ResolveBackendPixel, which must
-	// be applied before calling this) via Mirage::ToneMap, exactly matching
+	// PNG/JPG/BMP/TGA: tonemaps `pixels` (already fully resolved to linear
+	// radiance directly by the renderer backend - both CPU and GPU
+	// Render() calls return final, displayable color, no further
+	// resolve/division needed by the caller) via Mirage::ToneMap, exactly matching
 	// mirage/tools/scene_renderer/SceneRenderer.cpp's own
 	// tonemap-then-8-bit-clamp sequence, and writes the result to `path`.
 	// EXR: skips tonemapping/quantization entirely and writes `pixels`

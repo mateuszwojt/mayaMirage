@@ -104,8 +104,10 @@ void RenderWorker::ThreadMain()
 	const bool wantAovs = (aovBuffers.depth || aovBuffers.normal || aovBuffers.primId);
 
 	// CPU and GPU backends have genuinely different Render() call contracts
-	// (see ResolveBackendPixel's comment, and mirage/core/Renderer.cpp's
-	// CpuRenderer::Render() vs VulkanRenderer.cpp's VulkanRenderer::Render()):
+	// (see mirage/core/Renderer.cpp's CpuRenderer::Render() vs
+	// VulkanRenderer.cpp's VulkanRenderer::Render()), though both fully
+	// resolve m_workingPixels into final, displayable color on every call -
+	// neither backend needs (or wants) any further division by the plugin.
 	// GPU does exactly one progressive sample per call, accumulating
 	// persistently inside the Renderer object across calls, so looping here
 	// once per sample is correct. CPU has no such persistent state - a
@@ -116,8 +118,8 @@ void RenderWorker::ThreadMain()
 	// maxSamples times, each redoing all maxSamples samples from scratch -
 	// maxSamples^2 total sample-equivalents instead of maxSamples - and
 	// additionally corrupted the image, since each call's already-resolved
-	// (divided) output got a fresh raw accumulation splatted on top of it
-	// before being re-resolved by the next call.
+	// output got a fresh raw accumulation splatted on top of it before being
+	// re-resolved by the next call.
 	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 
 	if (isGpu)
@@ -238,28 +240,10 @@ void RenderWorker::FinishRender()
 	m_running.store(false);
 }
 
-Mirage::Color RenderWorker::ResolveBackendPixel(const Mirage::Color &raw, bool isGpuBackend)
-{
-	if (isGpuBackend)
-	{
-		// VulkanRenderer already resolves its persistent GPU-side
-		// accumulation buffer into an already-averaged .x/.y/.z on every
-		// Render() call.
-		return raw;
-	}
-
-	// CPU backend accumulates additively (output[i] += sample, .w holds the
-	// running filter weight) - the caller must divide.
-	const float weight = (raw.w > 0.0f) ? raw.w : 1.0f;
-	return Mirage::Color(raw.x / weight, raw.y / weight, raw.z / weight, 1.0f);
-}
-
 void RenderWorker::PushPixelsToRenderView(const std::vector<Mirage::Color> &pixels, int width, int height)
 {
 	if (pixels.empty())
 		return;
-
-	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 
 	// MRenderView::updatePixels() (like getRenderRegion()/refresh(), all
 	// defined in terms of left/right/bottom/top) follows Maya's OpenGL-style
@@ -278,7 +262,7 @@ void RenderWorker::PushPixelsToRenderView(const std::vector<Mirage::Color> &pixe
 		const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
 		for (int x = 0; x < width; ++x)
 		{
-			Mirage::Color resolved = ResolveBackendPixel(pixels[srcRowStart + x], isGpu);
+			const Mirage::Color &resolved = pixels[srcRowStart + x];
 			RV_PIXEL &out = outPixels[dstRowStart + x];
 			out.r = resolved.x * 255.0f;
 			out.g = resolved.y * 255.0f;
@@ -294,10 +278,9 @@ void RenderWorker::PushPixelsToRenderView(const std::vector<Mirage::Color> &pixe
 namespace
 {
 	// AOVs are single-valued first-hit snapshots (not progressively
-	// accumulated like the beauty buffer), so they never need the CPU/GPU
-	// weight-division ResolveBackendPixel does for the beauty buffer - both
-	// backends already write them as plain per-pixel values (see
-	// mirage/core/Renderer.h's AovBuffers doc). Depth/primId are
+	// accumulated like the beauty buffer) - both backends already write
+	// them as plain per-pixel values (see mirage/core/Renderer.h's
+	// AovBuffers doc). Depth/primId are
 	// single-channel; remapped here into something visually meaningful in
 	// an 8-bit RGB channel rather than shown as a raw, mostly-black/white
 	// unbounded value.
@@ -401,7 +384,6 @@ void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, u
 		return;
 
 	// Same bottom-up flip as PushPixelsToRenderView - see its comment.
-	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 	std::vector<RV_PIXEL> outPixels(pixelSnapshot.size());
 	for (int y = 0; y < m_options.height; ++y)
 	{
@@ -409,7 +391,7 @@ void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, u
 		const size_t dstRowStart = static_cast<size_t>(m_options.height - 1 - y) * m_options.width;
 		for (int x = 0; x < m_options.width; ++x)
 		{
-			Mirage::Color resolved = ResolveBackendPixel(pixelSnapshot[srcRowStart + x], isGpu);
+			const Mirage::Color &resolved = pixelSnapshot[srcRowStart + x];
 			RV_PIXEL &out = outPixels[dstRowStart + x];
 			out.r = resolved.x * 255.0f;
 			out.g = resolved.y * 255.0f;
@@ -445,10 +427,6 @@ void RenderWorker::RenderBatchSynchronous(const Mirage::Camera &camera, const Mi
 	else
 	{
 		renderer->Render(camera, options, pixels.data());
-	}
-	for (auto &pixel : pixels)
-	{
-		pixel = ResolveBackendPixel(pixel, isGpu);
 	}
 
 	// Resolve the output path/format/frame padding via Maya's own Common
