@@ -1,7 +1,6 @@
 #include "LightTranslator.h"
 
-#include <algorithm>
-#include <cmath>
+#include <iostream>
 
 #include <maya/MFn.h>
 #include <maya/MFnPointLight.h>
@@ -11,27 +10,17 @@
 #include <maya/MFnAmbientLight.h>
 #include <maya/MTransformationMatrix.h>
 #include <maya/MMatrix.h>
+#include <maya/MQuaternion.h>
 #include <maya/MColor.h>
 #include <maya/MFloatVector.h>
+#include <maya/MGlobal.h>
+#include <maya/MStatus.h>
+#include <maya/MString.h>
 
+#include <mirage/lights/PunctualLight.h>
+#include <mirage/lights/Skylight.h>
 #include <mirage/utils/MathUtils.h>
 #include <mirage/utils/Util.h>
-
-namespace
-{
-	// Emissive-sphere point/spot-light approximations use an arbitrary,
-	// fixed radius (Maya's point/spot lights are true delta lights with no
-	// physical size of their own to derive one from). Scaling emission
-	// inversely with that sphere's surface area keeps total emitted power
-	// roughly consistent regardless of this arbitrary choice, rather than
-	// having brightness be an accidental artifact of it - a standard
-	// technique for "light with radius" approximations in offline renderers.
-	float SphereAreaCompensation(float radius)
-	{
-		const float area = 4.0f * static_cast<float>(M_PI) * radius * radius;
-		return 1.0f / std::max(area, 1e-6f);
-	}
-}
 
 void LightTranslator::Translate(const MDagPath &lightPath)
 {
@@ -74,14 +63,15 @@ void LightTranslator::TranslatePointLight(const MDagPath &path)
 	MTransformationMatrix xform(path.inclusiveMatrix());
 	MVector pos = xform.getTranslation(MSpace::kTransform);
 
-	// Mirage has no true point/delta light - approximate with a small
-	// emissive sphere (the standard path-tracer workaround for a
-	// physically-zero-area source). The radius is an arbitrary modeling
-	// choice, not derived from any Maya attribute.
+	// A small, fixed soft-shadow radius - Maya's point light is a true
+	// delta light with no physical size of its own to derive one from, so
+	// this is an arbitrary-but-reasonable modeling choice (same value the
+	// pre-1.2.0 emissive-sphere approximation used), now driving Mirage's
+	// real PunctualLight soft-shadow sampling (PunctualLightSample's
+	// radius > 0 jitter) instead of faking it via sphere surface area.
 	const float radius = 0.05f;
-	Mirage::Vec3 emission = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale * SphereAreaCompensation(radius);
-
-	AddEmissiveSphere(Mirage::Vec3(static_cast<float>(pos.x), static_cast<float>(pos.y), static_cast<float>(pos.z)), radius, emission);
+	AddPointLight(Mirage::Vec3(static_cast<float>(pos.x), static_cast<float>(pos.y), static_cast<float>(pos.z)),
+				  Mirage::Vec3(color.r, color.g, color.b), intensity, radius);
 }
 
 void LightTranslator::TranslateSpotLight(const MDagPath &path)
@@ -92,25 +82,20 @@ void LightTranslator::TranslateSpotLight(const MDagPath &path)
 
 	MTransformationMatrix xform(path.inclusiveMatrix());
 	MVector pos = xform.getTranslation(MSpace::kTransform);
-	MFloatVector dir = light.lightDirection();
 
-	// Mirage has no light type carrying a direction/cone-angle concept at
-	// all, so a spot's cone falloff cannot be represented - this is the
-	// weakest of the emissive-sphere approximations. Offsetting the sphere
-	// slightly along the spot's direction at least biases where the light
-	// visually originates from, rather than behaving exactly like an
-	// omnidirectional point light in the same position; the cone itself is
-	// simply not there; geometry outside where the real cone would be will
-	// still be lit.
+	// Mirage's PunctualLightType is only ePoint/eDirectional - there is
+	// still no light type carrying a direction/cone-angle concept, so a
+	// spot's cone falloff remains unrepresentable, same limitation as
+	// before v1.2.0. This now maps to an ordinary ePoint punctual light
+	// (dropping the old "offset an emissive sphere along the spot's
+	// direction" hack, which only vaguely biased where the light visually
+	// originated from) - a strictly better approximation than before (a
+	// true delta/soft-point light instead of a fake emissive sphere), just
+	// still omnidirectional: geometry outside where the real cone would be
+	// is still lit.
 	const float radius = 0.05f;
-	Mirage::Vec3 emission = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale * SphereAreaCompensation(radius);
-
-	Mirage::Vec3 offsetPos(
-		static_cast<float>(pos.x) + dir.x * radius,
-		static_cast<float>(pos.y) + dir.y * radius,
-		static_cast<float>(pos.z) + dir.z * radius);
-
-	AddEmissiveSphere(offsetPos, radius, emission);
+	AddPointLight(Mirage::Vec3(static_cast<float>(pos.x), static_cast<float>(pos.y), static_cast<float>(pos.z)),
+				  Mirage::Vec3(color.r, color.g, color.b), intensity, radius);
 }
 
 void LightTranslator::TranslateDirectionalLight(const MDagPath &path)
@@ -119,29 +104,59 @@ void LightTranslator::TranslateDirectionalLight(const MDagPath &path)
 	MColor color = light.color();
 	float intensity = light.intensity();
 
-	MTransformationMatrix xform(path.inclusiveMatrix());
-	MVector pos = xform.getTranslation(MSpace::kTransform);
-	MFloatVector dir = light.lightDirection();
+	// MFnLight::lightDirection()'s no-instance/no-space overload
+	// (the pre-v1.2.0 code's original call here) comes back as a zero
+	// vector when called on an MFnDirectionalLight built directly from a
+	// DAG path outside an actual shading callback - it silently went
+	// unnoticed before because the old "huge emissive sphere placed at
+	// lightPos - dir*distance" approximation degraded gracefully with
+	// dir=(0,0,0) (the sphere just landed at the light's own position,
+	// still large enough to light the scene); a true delta PunctualLight
+	// has no such tolerance - Normalize((0,0,0)) is degenerate, so the
+	// light silently contributed nothing at all. The explicit-instance/
+	// explicit-space overload below is Maya's documented API for this and
+	// returns the correct world-space direction.
+	MStatus status;
+	MFloatVector dir = light.lightDirection(0, MSpace::kWorld, &status);
+	Mirage::Vec3 direction(dir.x, dir.y, dir.z);
 
-	// Mirage has no true infinite/distant light type - approximate with a
-	// large emissive sphere placed far away along the light's direction.
-	// This is the weakest mapping of the five: "far away" is an arbitrary
-	// fixed distance (not derived from the actual scene's scale), and it
-	// changes penumbra/shadow softness in ways a real directional light
-	// wouldn't. Deliberately not layering further "compensation" math onto
-	// this one the way the point/spot cases do - it would suggest a
-	// precision this approximation doesn't have. Use the lightIntensityScale
-	// render-globals setting to calibrate brightness for a given scene.
-	const float distance = 1000.0f;
-	const float radius = 200.0f;
-	Mirage::Vec3 farPos(
-		static_cast<float>(pos.x) - dir.x * distance,
-		static_cast<float>(pos.y) - dir.y * distance,
-		static_cast<float>(pos.z) - dir.z * distance);
+	if (status != MS::kSuccess || Mirage::LengthSq(direction) < 1.e-12f)
+	{
+		MGlobal::displayWarning(MString("Mirage: directional light '") + path.partialPathName()
+								 + "' resolved to a degenerate direction - falling back to straight down.");
+		direction = Mirage::Vec3(0.0f, -1.0f, 0.0f);
+	}
 
-	Mirage::Vec3 emission = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale;
+	// True parallel-ray delta light via Mirage v1.2.0's eDirectional
+	// PunctualLight - this replaces the old "large emissive sphere placed
+	// far away" workaround entirely (previously documented as the weakest
+	// of the light approximations: an arbitrary fixed distance that
+	// distorted shadow softness). `angle` (angular diameter, e.g. the
+	// sun's ~0.53 degrees) is left at 0 for a sharp delta shadow - there's
+	// no Maya attribute to derive a physical value from, same
+	// "don't invent precision" choice as the point/spot radius above being
+	// a fixed constant rather than a derived one.
+	Mirage::PunctualLight pLight;
+	pLight.type = Mirage::PunctualLightType::eDirectional;
+	pLight.direction = direction;
+	pLight.color = Mirage::Vec3(color.r, color.g, color.b);
+	pLight.intensity = intensity * m_intensityScale;
+	m_scene.lights.push_back(pLight);
 
-	AddEmissiveSphere(farPos, radius, emission);
+	std::cout << "\tDirectional light: direction (" << direction.x << ", " << direction.y << ", " << direction.z
+			   << "), color (" << color.r << ", " << color.g << ", " << color.b << "), intensity " << intensity
+			   << " -> Mirage intensity " << pLight.intensity << " (scale " << m_intensityScale << ")" << std::endl;
+
+	// Remembered for FinalizeSky()'s Preetham bake - see its comment and
+	// RenderGlobals.h's SkySettings for why the sun direction comes from
+	// here rather than a dedicated attribute. First directional light
+	// encountered wins, same "last/first one wins" simplification already
+	// used for multiple ambient lights below.
+	if (!m_sawDirectionalLight)
+	{
+		m_lastDirectionalLightDir = direction;
+		m_sawDirectionalLight = true;
+	}
 }
 
 void LightTranslator::TranslateAreaLight(const MDagPath &path)
@@ -151,24 +166,41 @@ void LightTranslator::TranslateAreaLight(const MDagPath &path)
 	float intensity = light.intensity();
 
 	// Maya's area light is a unit (1x1) quad in the light shape's own local
-	// space, scaled/rotated/positioned by its transform - transforming the
-	// 4 unit-quad corners by the world matrix directly (rather than trying
-	// to derive width/height from some dedicated attribute, which doesn't
-	// exist) reproduces whatever size/facing the light's own icon has.
-	MMatrix worldMatrix = path.inclusiveMatrix();
-	MPoint corners[4] = {
-		MPoint(-0.5, -0.5, 0.0) * worldMatrix,
-		MPoint(0.5, -0.5, 0.0) * worldMatrix,
-		MPoint(0.5, 0.5, 0.0) * worldMatrix,
-		MPoint(-0.5, 0.5, 0.0) * worldMatrix,
-	};
+	// XY plane (normal = local +Z) - exactly Primitive::eRect's local-space
+	// convention (see Primitive.h's RectGeometry comment), so decomposing
+	// the world matrix into translation/rotation/scale and feeding
+	// scaleX/scaleY straight into rect.width/height is a direct mapping,
+	// no axis remapping needed. This replaces the old two-triangle emissive
+	// Mesh built by baking world-space corners directly - simpler, and uses
+	// the shape Mirage v1.2.0 added specifically for this. The tradeoff:
+	// MTransformationMatrix's decomposition assumes no shear, unlike the
+	// old bake-the-corners approach which was shear-correct "for free" -
+	// sheared area lights (rare in practice) will render slightly wrong
+	// now, same kind of tradeoff MeshTranslator already documents for
+	// sheared mesh instances.
+	MTransformationMatrix xform(path.inclusiveMatrix());
+	MVector t = xform.getTranslation(MSpace::kWorld);
+	MQuaternion rotation = xform.rotation();
+	double scale[3] = {1.0, 1.0, 1.0};
+	xform.getScale(scale, MSpace::kWorld);
 
-	// Area lights are Mirage's best-supported case - its own light model
-	// *is* emissive geometry, so this is a close match rather than an
-	// approximation like the other four.
-	Mirage::Vec3 emission = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale;
+	Mirage::Primitive primitive;
+	primitive.type = Mirage::eRect;
+	primitive.rect.width = static_cast<float>(scale[0]);
+	primitive.rect.height = static_cast<float>(scale[1]);
+	primitive.startTransform = Mirage::Transform(
+		Mirage::Vec3(static_cast<float>(t.x), static_cast<float>(t.y), static_cast<float>(t.z)),
+		Mirage::Quat(static_cast<float>(rotation.x), static_cast<float>(rotation.y), static_cast<float>(rotation.z), static_cast<float>(rotation.w)),
+		1.0f);
+	primitive.endTransform = primitive.startTransform;
+	primitive.lightSamples = 1;
 
-	AddEmissiveQuad(corners, emission);
+	auto material = std::make_unique<Mirage::Material>();
+	material->color = Mirage::Vec3(0.0f);
+	material->emission = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale;
+	primitive.materialIndex = m_scene.AddMaterial(std::move(material));
+
+	m_scene.AddPrimitive(primitive);
 }
 
 void LightTranslator::TranslateAmbientLight(const MDagPath &path)
@@ -178,18 +210,37 @@ void LightTranslator::TranslateAmbientLight(const MDagPath &path)
 	float intensity = light.intensity();
 
 	// A flat, uniform-from-everywhere contribution is a good match for
-	// Mirage's non-probe Sky, which is itself just a horizon/zenith
-	// gradient - setting both to the same color makes it flat rather than
-	// gradiented. If multiple ambient lights exist in the scene, the last
-	// one encountered wins (a documented simplification, not a crash).
+	// Mirage's gradient Sky - setting both horizon and zenith to the same
+	// color makes it flat rather than gradiented. If multiple ambient
+	// lights exist, the last one encountered wins. Superseded by a
+	// Preetham bake in FinalizeSky() if that's enabled - see its comment.
 	Mirage::Vec3 c = Mirage::Vec3(color.r, color.g, color.b) * intensity * m_intensityScale;
 	m_scene.sky.horizon = c;
 	m_scene.sky.zenith = c;
 	m_sawAmbientLight = true;
+
+	std::cout << "\tAmbient light: color (" << color.r << ", " << color.g << ", " << color.b << "), intensity "
+			   << intensity << " -> sky (" << c.x << ", " << c.y << ", " << c.z << ")" << std::endl;
 }
 
-void LightTranslator::FinalizeSky()
+void LightTranslator::FinalizeSky(bool preetham, float turbidity)
 {
+	std::cout << "\tFinalizeSky: preetham=" << (preetham ? "true" : "false") << ", turbidity=" << turbidity
+			   << ", sawAmbientLight=" << (m_sawAmbientLight ? "true" : "false")
+			   << ", sawDirectionalLight=" << (m_sawDirectionalLight ? "true" : "false")
+			   << ", scene.lights.size()=" << m_scene.lights.size() << std::endl;
+
+	if (preetham)
+	{
+		// Sun direction comes from whichever directional light Translate()
+		// saw first (see TranslateDirectionalLight); a scene with none
+		// falls back to a fixed, reasonable default angle rather than
+		// baking a degenerate/zenith-locked sky.
+		const Mirage::Vec3 sunDir = m_sawDirectionalLight ? -m_lastDirectionalLightDir : Mirage::Vec3(0.3f, 0.8f, 0.2f);
+		m_scene.sky.probe = Mirage::BakePreethamSky(sunDir, turbidity);
+		return;
+	}
+
 	if (m_sawAmbientLight)
 		return;
 
@@ -198,50 +249,17 @@ void LightTranslator::FinalizeSky()
 	m_scene.sky.zenith = dim;
 }
 
-void LightTranslator::AddEmissiveSphere(const Mirage::Vec3 &position, float radius, const Mirage::Vec3 &emission)
+void LightTranslator::AddPointLight(const Mirage::Vec3 &position, const Mirage::Vec3 &color, float intensity, float radius)
 {
-	auto material = std::make_unique<Mirage::Material>();
-	material->color = Mirage::Vec3(0.0f);
-	material->emission = emission;
+	Mirage::PunctualLight pLight;
+	pLight.type = Mirage::PunctualLightType::ePoint;
+	pLight.position = position;
+	pLight.color = color;
+	pLight.intensity = intensity * m_intensityScale;
+	pLight.radius = radius;
+	m_scene.lights.push_back(pLight);
 
-	Mirage::Primitive primitive;
-	primitive.type = Mirage::eSphere;
-	primitive.sphere.radius = radius;
-	primitive.startTransform.p = position;
-	primitive.endTransform = primitive.startTransform;
-	primitive.lightSamples = 1;
-	primitive.materialIndex = m_scene.AddMaterial(std::move(material));
-
-	m_scene.AddPrimitive(primitive);
-}
-
-void LightTranslator::AddEmissiveQuad(const MPoint corners[4], const Mirage::Vec3 &emission)
-{
-	auto mesh = std::make_unique<Mirage::Mesh>();
-
-	Mirage::Vec3 v0(static_cast<float>(corners[0].x), static_cast<float>(corners[0].y), static_cast<float>(corners[0].z));
-	Mirage::Vec3 v1(static_cast<float>(corners[1].x), static_cast<float>(corners[1].y), static_cast<float>(corners[1].z));
-	Mirage::Vec3 v2(static_cast<float>(corners[2].x), static_cast<float>(corners[2].y), static_cast<float>(corners[2].z));
-	Mirage::Vec3 v3(static_cast<float>(corners[3].x), static_cast<float>(corners[3].y), static_cast<float>(corners[3].z));
-
-	Mirage::Vec3 normal = Mirage::SafeNormalize(Mirage::Cross(v1 - v0, v2 - v0), Mirage::Vec3(0.0f, 1.0f, 0.0f));
-
-	mesh->vertices = {v0, v1, v2, v3};
-	mesh->normals = {normal, normal, normal, normal};
-	mesh->uvs = {Mirage::Vec2(0.0f, 0.0f), Mirage::Vec2(1.0f, 0.0f), Mirage::Vec2(1.0f, 1.0f), Mirage::Vec2(0.0f, 1.0f)};
-	mesh->indices = {0, 1, 2, 0, 2, 3};
-	mesh->rebuildBVH();
-
-	auto material = std::make_unique<Mirage::Material>();
-	material->color = Mirage::Vec3(0.0f);
-	material->emission = emission;
-
-	Mirage::Primitive primitive;
-	primitive.type = Mirage::eMesh;
-	primitive.mesh = Mirage::GeometryFromMesh(mesh.get());
-	primitive.lightSamples = 1;
-	primitive.materialIndex = m_scene.AddMaterial(std::move(material));
-
-	m_scene.AddPrimitive(primitive);
-	m_scene.AddMesh(std::move(mesh));
+	std::cout << "\tPoint/spot light: position (" << position.x << ", " << position.y << ", " << position.z
+			   << "), color (" << color.x << ", " << color.y << ", " << color.z << "), intensity " << intensity
+			   << " -> Mirage intensity " << pLight.intensity << " (scale " << m_intensityScale << ")" << std::endl;
 }

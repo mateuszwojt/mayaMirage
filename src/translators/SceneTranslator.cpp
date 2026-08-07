@@ -36,7 +36,7 @@ namespace
 }
 
 void SceneTranslator::Translate(Mirage::Scene &scene, float lightIntensityScale, const MotionBlurSettings &motionBlur,
-								 bool enableInstancing)
+								 bool enableInstancing, bool preetham, float turbidity)
 {
 	MaterialTranslator materialTranslator(scene);
 	LightTranslator lightTranslator(scene, lightIntensityScale);
@@ -91,5 +91,5 @@ void SceneTranslator::Translate(Mirage::Scene &scene, float lightIntensityScale,
 		}
 	}
 
-	lightTranslator.FinalizeSky();
+	lightTranslator.FinalizeSky(preetham, turbidity);
 }

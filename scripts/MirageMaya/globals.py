@@ -171,6 +171,35 @@ def create_render_globals_tab():
 
     cmds.setParent("..")
 
+    # = Sky =
+
+    cmds.frameLayout("skyFrameLayout", label="Sky", collapsable=True, collapse=True)
+
+    cmds.separator(height=2)
+
+    cmds.attrEnumOptionMenuGrp(
+        "mirageSkyType",
+        label = "Type",
+        annotation = "Preetham (Mirage v1.2.0) bakes an analytic physical sky using the scene's "
+                     "first directional light as the sun direction (a fixed default angle if "
+                     "there isn't one), instead of a flat gradient.",
+        columnWidth = (3, 160),
+        columnAttach= (1, "left", 4),
+        attribute = "defaultMirageRenderGlobals.skyType")
+
+    cmds.attrFieldSliderGrp(
+        "mirageSkyTurbidity",
+        label = "Turbidity",
+        annotation = "Atmospheric turbidity: ~2 is a very clear sky, ~6-10 is hazy/overcast-tending. "
+                     "Only used in Preetham mode.",
+        columnWidth = (3, 160),
+        columnAttach= (1, "left", 4),
+        minValue = 1,
+        maxValue = 10,
+        attribute = "defaultMirageRenderGlobals.skyTurbidity")
+
+    cmds.setParent("..")
+
     # = AOVs =
 
     cmds.frameLayout("aovFrameLayout", label="AOVs", collapsable=True, collapse=True)
@@ -284,6 +313,12 @@ def update_render_globals_tab():
     motion_blur_enabled = cmds.getAttr("defaultMirageRenderGlobals.motionBlurEnabled")
     cmds.attrFieldSliderGrp("mirageShutterOpen", edit=True, enable=motion_blur_enabled)
     cmds.attrFieldSliderGrp("mirageShutterClose", edit=True, enable=motion_blur_enabled)
+
+    # Turbidity only means anything in Preetham mode (skyType == 1) - see
+    # RenderGlobals.cpp's gSkyType field order ("Gradient", "Preetham").
+    if cmds.control("mirageSkyTurbidity", exists=True):
+        sky_is_preetham = cmds.getAttr("defaultMirageRenderGlobals.skyType") == 1
+        cmds.attrFieldSliderGrp("mirageSkyTurbidity", edit=True, enable=sky_is_preetham)
 
 
 # Register create Mirage Renderer Tab

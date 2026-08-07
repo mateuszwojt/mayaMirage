@@ -32,6 +32,10 @@ class MirageGlobalsControls(Custom):
         with self.frameLayout("Lighting", expanded=False):
             self.addControl("lightIntensityScale")
 
+        with self.frameLayout("Sky", expanded=False):
+            self.addControl("skyType")
+            self.addControl("skyTurbidity")
+
         with self.frameLayout("AOVs", expanded=False):
             self.addControl("enableDepthAOV")
             self.addControl("enableNormalAOV")

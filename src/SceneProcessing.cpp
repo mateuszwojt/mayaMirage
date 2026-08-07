@@ -93,8 +93,32 @@ void RenderProcedure::translateCamera(MString cameraName)
 	std::cout << "\tCamera FOV : " << m_Camera.fov << std::endl;
 
 	// set focal point and aperture
+	//
+	// Mirage v1.2.0 adds real physical camera fields (Camera::focalLength/
+	// sensorWidth/sensorHeight/fStop) and EffectiveFov()/
+	// EffectiveApertureDiameter() helpers that derive FOV/DOF-aperture from
+	// them - but EffectiveFov() only activates when focalLength > 0, and its
+	// formula (2*atan(sensorHeight/(2*focalLength))) doesn't know about Film
+	// Fit or render aspect ratio the way getRenderingFrustum() above does.
+	// Setting m_Camera.focalLength here would silently regress exactly the
+	// overscan/Film-Fit bug the FOV computation above was written to fix, so
+	// it's deliberately left unset (0 = "unset", per Camera.h's own
+	// convention) and m_Camera.fov above remains authoritative.
+	//
+	// DOF aperture is a separate story: this used to stuff Maya's fStop
+	// (an f-number, e.g. 5.6) directly into the legacy `aperture` field,
+	// which Mirage documents as a scene-world lens *diameter* - not the
+	// same unit at all, just a value that happened to produce some blur.
+	// Compute the real physical diameter instead, using the same formula
+	// Camera::EffectiveApertureDiameter() applies internally
+	// (focalLength_mm / fStop, converted mm -> scene-world meters) but
+	// against the legacy `aperture` field directly, so DOF benefits from
+	// the physical model without touching `focalLength`/`fStop` and
+	// thereby triggering EffectiveFov().
 	m_Camera.focalPoint = camera.focusDistance();
-	m_Camera.aperture = camera.fStop();
+	const double focalLengthMm = camera.focalLength();
+	const double fStop = camera.fStop();
+	m_Camera.aperture = (fStop > 0.0) ? static_cast<float>((focalLengthMm / fStop) / 1000.0) : 0.0f;
 	std::cout << "\tCamera focal point : " << m_Camera.focalPoint << std::endl;
 	std::cout << "\tCamera aperture : " << m_Camera.aperture << std::endl;
 
@@ -123,6 +147,8 @@ void RenderProcedure::buildScene(MString cameraName)
 	const RenderGlobalsNode::MotionBlurSettings mb = RenderGlobalsNode::getMotionBlurSettings();
 	MotionBlurSettings translatorMotionBlur{mb.enabled, mb.shutterOpen, mb.shutterClose};
 
+	const RenderGlobalsNode::SkySettings sky = RenderGlobalsNode::getSkySettings();
+
 	SceneTranslator::Translate(m_session->scene, RenderGlobalsNode::getLightIntensityScale(), translatorMotionBlur,
-							   RenderGlobalsNode::getEnableInstancing());
+							   RenderGlobalsNode::getEnableInstancing(), sky.preetham, sky.turbidity);
 }

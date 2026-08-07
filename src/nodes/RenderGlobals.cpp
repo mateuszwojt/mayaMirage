@@ -34,6 +34,8 @@ MObject RenderGlobalsNode::gEnableNormalAOV;
 MObject RenderGlobalsNode::gEnablePrimIdAOV;
 MObject RenderGlobalsNode::gOutputImageFormat;
 MObject RenderGlobalsNode::gEnableInstancing;
+MObject RenderGlobalsNode::gSkyType;
+MObject RenderGlobalsNode::gSkyTurbidity;
 
 MObject RenderGlobalsNode::gNLMWidth;
 MObject RenderGlobalsNode::gNLMFalloff;
@@ -183,6 +185,23 @@ MStatus RenderGlobalsNode::initialize()
 	gEnableInstancing = numAttr.create("enableInstancing", "enableInstancing", MFnNumericData::kBoolean, true, &status);
 	CHECK_MSTATUS(status);
 	addAttribute(gEnableInstancing);
+
+	// Mirage v1.2.0's analytic Preetham sky (see mirage/lights/Skylight.h) -
+	// an alternative to the flat horizon/zenith gradient LightTranslator
+	// otherwise builds from an MFnAmbientLight. See SkySettings' comment
+	// (RenderGlobals.h) for why there's no separate sun-direction control
+	// here: it's derived from the scene's first directional light instead.
+	gSkyType = eAttr.create("skyType", "skyType", 0, &status);
+	CHECK_MSTATUS(status);
+	eAttr.addField("Gradient", 0);
+	eAttr.addField("Preetham", 1);
+	addAttribute(gSkyType);
+
+	gSkyTurbidity = numAttr.create("skyTurbidity", "skyTurbidity", MFnNumericData::kFloat, 3.0f, &status);
+	CHECK_MSTATUS(status);
+	numAttr.setMin(1.0f);
+	numAttr.setMax(10.0f);
+	addAttribute(gSkyTurbidity);
 
 	gNLMWidth = numAttr.create("nlmWidth", "nlmWidth", MFnNumericData::kFloat, opts.nlmWidth, &status);
 	CHECK_MSTATUS(status);
@@ -382,6 +401,25 @@ RenderGlobalsNode::MotionBlurSettings RenderGlobalsNode::getMotionBlurSettings()
 	MPlug pShutterClose(mObj, gShutterClose);
 	pShutterClose.getValue(shutterClose);
 	settings.shutterClose = shutterClose;
+
+	return settings;
+}
+
+RenderGlobalsNode::SkySettings RenderGlobalsNode::getSkySettings()
+{
+	SkySettings settings{false, 3.0f};
+
+	MObject mObj;
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
+		return settings;
+
+	int skyType = 0;
+	MPlug pSkyType(mObj, gSkyType);
+	pSkyType.getValue(skyType);
+	settings.preetham = (skyType == 1);
+
+	MPlug pTurbidity(mObj, gSkyTurbidity);
+	pTurbidity.getValue(settings.turbidity);
 
 	return settings;
 }
