@@ -2,6 +2,8 @@
 #include "ImageWriter.h"
 #include "nodes/RenderGlobals.h"
 
+#include <chrono>
+
 #include <maya/MEventMessage.h>
 #include <maya/MGlobal.h>
 #include <maya/MRenderView.h>
@@ -41,6 +43,12 @@ void RenderWorker::CancelAndWaitForIdle()
 	while (m_running.load())
 	{
 		OnIdle();
+		// A tight spin here is harmless while a GPU sample (or, post-fix, a
+		// correctly-sized CPU render) is in flight, since the worker thread
+		// notices m_cancelRequested quickly either way. Yield anyway so this
+		// doesn't peg Maya's main thread at 100% CPU for the loop's duration -
+		// cheap insurance against reading as "frozen" rather than "waiting".
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 }
 
@@ -95,10 +103,46 @@ void RenderWorker::ThreadMain()
 	aovBuffers.primId = m_workingPrimId.empty() ? nullptr : m_workingPrimId.data();
 	const bool wantAovs = (aovBuffers.depth || aovBuffers.normal || aovBuffers.primId);
 
-	while (m_completedSamples.load() < m_options.maxSamples && !m_cancelRequested.load())
+	// CPU and GPU backends have genuinely different Render() call contracts
+	// (see ResolveBackendPixel's comment, and mirage/core/Renderer.cpp's
+	// CpuRenderer::Render() vs VulkanRenderer.cpp's VulkanRenderer::Render()):
+	// GPU does exactly one progressive sample per call, accumulating
+	// persistently inside the Renderer object across calls, so looping here
+	// once per sample is correct. CPU has no such persistent state - a
+	// single call already contains its own internal loop over *all*
+	// options.maxSamples samples and fully resolves m_workingPixels in
+	// place before returning. Looping this outer while() for CPU too (as
+	// this used to do unconditionally) called CpuRenderer::Render()
+	// maxSamples times, each redoing all maxSamples samples from scratch -
+	// maxSamples^2 total sample-equivalents instead of maxSamples - and
+	// additionally corrupted the image, since each call's already-resolved
+	// (divided) output got a fresh raw accumulation splatted on top of it
+	// before being re-resolved by the next call.
+	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
+
+	if (isGpu)
+	{
+		while (m_completedSamples.load() < m_options.maxSamples && !m_cancelRequested.load())
+		{
+			renderer->Render(m_camera, m_options, m_workingPixels.data(), wantAovs ? &aovBuffers : nullptr);
+			m_completedSamples.fetch_add(1);
+
+			{
+				std::lock_guard<std::mutex> lock(m_bufferMutex);
+				m_latestPixels = m_workingPixels;
+				if (wantAovs)
+				{
+					m_latestDepth = m_workingDepth;
+					m_latestNormal = m_workingNormal;
+					m_latestPrimId = m_workingPrimId;
+				}
+			}
+		}
+	}
+	else if (!m_cancelRequested.load())
 	{
 		renderer->Render(m_camera, m_options, m_workingPixels.data(), wantAovs ? &aovBuffers : nullptr);
-		m_completedSamples.fetch_add(1);
+		m_completedSamples.store(m_options.maxSamples);
 
 		{
 			std::lock_guard<std::mutex> lock(m_bufferMutex);
@@ -385,12 +429,23 @@ void RenderWorker::RenderBatchSynchronous(const Mirage::Camera &camera, const Mi
 	const size_t pixelCount = static_cast<size_t>(options.width) * static_cast<size_t>(options.height);
 	std::vector<Mirage::Color> pixels(pixelCount, Mirage::Color());
 
-	for (int i = 0; i < options.maxSamples; ++i)
+	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
+
+	// Same backend-aware call count as ThreadMain (see its comment): GPU
+	// needs one Render() call per sample, CPU needs exactly one call total
+	// since it already loops over all options.maxSamples samples internally
+	// and fully resolves `pixels` before returning.
+	if (isGpu)
+	{
+		for (int i = 0; i < options.maxSamples; ++i)
+		{
+			renderer->Render(camera, options, pixels.data());
+		}
+	}
+	else
 	{
 		renderer->Render(camera, options, pixels.data());
 	}
-
-	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 	for (auto &pixel : pixels)
 	{
 		pixel = ResolveBackendPixel(pixel, isGpu);

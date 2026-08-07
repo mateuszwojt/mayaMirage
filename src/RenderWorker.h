@@ -82,9 +82,12 @@ public:
 								 const MString &cameraName);
 
 	// Cooperative cancel: the worker thread only checks this between
-	// Render() calls (each call is a full-image sample pass), so cancel
-	// latency is bounded by roughly one sample's wall-clock time, not
-	// instantaneous.
+	// Render() calls. On GPU, each call is one progressive sample, so cancel
+	// latency is bounded by roughly one sample's wall-clock time. On CPU,
+	// a single call already performs the entire render (see ThreadMain's
+	// comment), so cancel latency there is bounded by one full render
+	// instead - there is no per-sample granularity to cancel into mid-call
+	// without the Mirage CPU backend itself exposing one.
 	void RequestCancel();
 
 private:
