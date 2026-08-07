@@ -4,10 +4,8 @@
 
 #include <maya/MTransformationMatrix.h>
 #include <maya/MVector.h>
-#include <maya/MDGContextGuard.h>
-#include <maya/MDGContext.h>
-#include <maya/MAnimControl.h>
-#include <maya/MTime.h>
+#include <maya/MItDependencyGraph.h>
+#include <maya/MFn.h>
 
 #include <mirage/math/Mat33.h>
 
@@ -86,4 +84,23 @@ MMatrix SampleWorldMatrixAt(const MDagPath &path, double frameOffset)
 	const MDGContext context(sampleTime);
 	MDGContextGuard guard(context);
 	return path.inclusiveMatrix();
+}
+
+bool HasUpstreamDeformer(const MDagPath &shapePath)
+{
+	MStatus status;
+	MObject shapeNode = shapePath.node();
+
+	// kGeometryFilt is the common base API type for every Maya deformer
+	// (skinCluster, blendShape, cluster, lattice, wire, ...) - filtering the
+	// upstream traversal by it, rather than enumerating specific deformer
+	// type names one by one, catches all of them uniformly. kNodeLevel (not
+	// kPlugLevel) is enough here since only "is there one at all" matters,
+	// not which plug it's connected through.
+	MItDependencyGraph it(shapeNode, MFn::kGeometryFilt, MItDependencyGraph::kUpstream,
+						   MItDependencyGraph::kBreadthFirst, MItDependencyGraph::kNodeLevel, &status);
+	if (status != MS::kSuccess)
+		return false;
+
+	return !it.isDone();
 }

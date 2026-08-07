@@ -133,6 +133,67 @@ void MeshTranslator::Translate(const MDagPath &anyInstancePath, Mirage::Scene &s
 	if (subMeshes.empty())
 		return; // degenerate mesh (no faces) - nothing to add
 
+	// Deforming (2-keyframe) vertex motion blur (Mirage v1.1.0's
+	// Mesh::verticesEnd): only worth the extra full re-sample of point
+	// positions at shutter-close for meshes that can actually move between
+	// shutter samples independent of their transform (skinned/blend-shaped
+	// geometry) - see HasUpstreamDeformer. Static/rigidly-transformed
+	// meshes keep verticesEnd empty (HasMotion() == false), exactly as
+	// before this feature, and get only the existing per-instance
+	// transform blur below.
+	if (motionBlur.enabled && HasUpstreamDeformer(anyInstancePath))
+	{
+		for (auto &entry : subMeshes)
+			// Fallback for any corner not revisited below (shouldn't happen -
+			// see comment in the WithTimeOffset block) - "no motion" for that
+			// corner rather than a garbage/zero position.
+			entry.second.mesh->verticesEnd = entry.second.mesh->vertices;
+
+		WithTimeOffset(motionBlur.shutterClose, [&]()
+		{
+			for (MItMeshPolygon polyIt(anyInstancePath); !polyIt.isDone(); polyIt.next())
+			{
+				const int faceIndex = static_cast<int>(polyIt.index());
+				const int shaderIdx = (faceIndex < static_cast<int>(faceShaderIndices.length())) ? faceShaderIndices[faceIndex] : -1;
+
+				auto found = subMeshes.find(shaderIdx);
+				if (found == subMeshes.end())
+					continue;
+				SubMeshBuilder &builder = found->second;
+
+				const unsigned int vertexCount = polyIt.polygonVertexCount();
+				const bool faceHasUVs = meshHasUVs && polyIt.hasUVs(currentUVSet);
+
+				for (unsigned int lv = 0; lv < vertexCount; ++lv)
+				{
+					// Topology (which position/normal/uv index a given
+					// face-corner maps to) is time-invariant under
+					// deformation - only the values those indices point at
+					// change - so the exact same CornerKey construction as
+					// the shutter-open pass above reliably resolves to the
+					// same corner's index via cornerToIndex, without needing
+					// to also re-derive normals/UVs (only the end-of-shutter
+					// position is needed here).
+					const int positionIndex = static_cast<int>(polyIt.vertexIndex(static_cast<int>(lv)));
+					const int normalIndex = static_cast<int>(polyIt.normalIndex(static_cast<int>(lv)));
+					const MPoint pos = polyIt.point(static_cast<int>(lv), MSpace::kObject);
+
+					int uvIndex = -1;
+					if (faceHasUVs)
+						polyIt.getUVIndex(static_cast<int>(lv), uvIndex, &currentUVSet);
+
+					const CornerKey key{positionIndex, normalIndex, uvIndex};
+					auto cornerIt = builder.cornerToIndex.find(key);
+					if (cornerIt == builder.cornerToIndex.end())
+						continue; // shouldn't happen given time-invariant topology
+
+					builder.mesh->verticesEnd[cornerIt->second] = Mirage::Vec3(
+						static_cast<float>(pos.x), static_cast<float>(pos.y), static_cast<float>(pos.z));
+				}
+			}
+		});
+	}
+
 	MDagPathArray allPaths;
 	MDagPath::getAllPathsTo(shapeObj, allPaths);
 
@@ -151,6 +212,16 @@ void MeshTranslator::Translate(const MDagPath &anyInstancePath, Mirage::Scene &s
 			materialIndex = materialTranslator.TranslateShadingEngine(shadingEngines[shaderIdx]);
 		else
 			materialIndex = materialTranslator.TranslateShadingEngine(MObject::kNullObj);
+
+		// Tangent-space normal mapping (Mirage v1.1.0): ComputeTangents()
+		// only requires normals.size() == vertices.size(), which the
+		// corner-dedup builder above already guarantees - deliberately NOT
+		// preceded by a CalculateNormals() call, which would discard the
+		// authored/per-corner normals just built (hard edges, custom vertex
+		// normals) in favor of pure face-normal averaging. A no-UV mesh
+		// leaves tangents empty (HasTangents() == false) - safe no-op, same
+		// as every other new-in-v1.1.0 field.
+		builder.mesh->ComputeTangents();
 
 		builder.mesh->rebuildBVH();
 
@@ -210,11 +281,19 @@ void MeshTranslator::Translate(const MDagPath &anyInstancePath, Mirage::Scene &s
 				// ~Mesh()), so a naive `Mesh copy = *builder.mesh;` after
 				// rebuildBVH() above would shallow-copy that pointer and
 				// double-free it.
+				// Deforming vertex motion blur (verticesEnd) is deliberately
+				// NOT carried into the baked copy, for the same single-
+				// vertex-buffer reason startTransform/endTransform blur
+				// isn't: this instance already only gets one static, pre-
+				// transformed snapshot (at worldMatrixStart) - there's no
+				// second buffer to also bake worldMatrixEnd/deformed
+				// positions into.
 				auto bakedMesh = std::make_unique<Mirage::Mesh>();
 				bakedMesh->vertices = builder.mesh->vertices;
 				bakedMesh->normals = builder.mesh->normals;
 				bakedMesh->uvs = builder.mesh->uvs;
 				bakedMesh->indices = builder.mesh->indices;
+				bakedMesh->tangents = builder.mesh->tangents;
 				bakedMesh->Transform(ToMirageMat44(worldMatrixStart));
 				bakedMesh->rebuildBVH();
 

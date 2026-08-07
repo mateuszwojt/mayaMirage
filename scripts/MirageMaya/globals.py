@@ -203,7 +203,7 @@ def create_render_globals_tab():
     cmds.attrEnumOptionMenuGrp(
         "mirageOutputImageFormat",
         label = "Image Format",
-        annotation = "Mirage only supports 8-bit PNG/JPG/BMP/TGA output, not Maya's full format list.",
+        annotation = "Mirage supports 8-bit PNG/JPG/BMP/TGA and 32-bit float EXR output, not Maya's full format list.",
         columnWidth = (3, 160),
         columnAttach= (1, "left", 4),
         attribute = "defaultMirageRenderGlobals.outputImageFormat")

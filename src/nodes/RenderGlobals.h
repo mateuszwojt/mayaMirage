@@ -71,11 +71,11 @@ public:
 	// Mirage::Options::aovMask, which is a real field on Options already.
 	static uint32_t getAovMask();
 
-	// PNG/JPG/BMP/TGA only - see ImageWriter.h for why. This is
-	// deliberately a separate, plugin-owned setting rather than an attempt
-	// to interpret Maya's own shared numeric MCommonRenderSettingsData::
-	// imageFormat field, which enumerates many formats (EXR, DPX, Cineon,
-	// ...) Mirage categorically can't produce.
+	// PNG/JPG/BMP/TGA/EXR - see ImageWriter.h for why the list stops there.
+	// This is deliberately a separate, plugin-owned setting rather than an
+	// attempt to interpret Maya's own shared numeric
+	// MCommonRenderSettingsData::imageFormat field, which enumerates many
+	// formats (DPX, Cineon, ...) Mirage still categorically can't produce.
 	static ImageOutputFormat getOutputImageFormat();
 
 	// Global escape hatch forcing MeshTranslator's always-bake fallback

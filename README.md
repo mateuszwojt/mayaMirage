@@ -7,8 +7,8 @@ The plugin registers Mirage as a classic Maya renderer (`Render > Render Current
 ## Requirements
 
 - Maya 2026 or 2027, with the standalone Maya devkit package extracted somewhere on disk (Maya 2023+ no longer bundles the devkit inside the application install).
-- macOS on Apple Silicon, or Linux (x86_64) — Mirage's GPU backend (Slang shaders via slang-rhi, native Vulkan on Linux / MoltenVK on macOS) builds and runs on both. Windows and macOS Intel aren't supported.
-- A built and installed [`mirage`](../mirage) (the `find_package(Mirage CONFIG)` package under `mirage/install/`).
+- macOS on Apple Silicon — Mirage's GPU backend (Slang shaders via slang-rhi/MoltenVK) only builds and runs on macOS.
+- A built and installed [`mirage`](../mirage) **v1.1.0 or later** (the `find_package(Mirage CONFIG)` package under `mirage/install/`) — this plugin uses v1.1.0 APIs (`Material::opacity`/`normalTextureIndex`, `Mesh::verticesEnd`/`tangents`, `Scene::AddInstancer`) that don't exist in v1.0.0.
 
 ## Building
 
@@ -52,10 +52,11 @@ Interactive renders (`Render Current Frame`) run on a background thread and refi
 ## What's translated
 
 - **Geometry**: triangulated meshes, correctly handling non-uniform scale/shear, per-face UV seams (unwelded to match Mirage's per-vertex UV model), and per-shading-group splitting (a mesh with multiple shading groups becomes multiple Mirage primitives).
-- **Instancing**: Maya DAG instances whose world transform is rigid (translate/rotate/uniform-scale) share one object-space mesh and BVH across all instances — genuine GPU-memory-shared instancing, not per-instance geometry copies. Instances with shear or non-uniform scale (which Mirage's transform can't represent) fall back to a baked private copy.
-- **Motion blur**: rigid-transform only — two time samples (at the configured shutter offsets) feed Mirage's per-primitive transform interpolation. Deforming/skinned meshes are not supported (Mirage's mesh format has no per-vertex motion representation).
-- **Materials**: `standardSurface` (primary target — base color, metalness, roughness, specular, coat, sheen, transmission, subsurface, emission, IOR) plus legacy Lambert/Blinn/Phong. Connected `file` textures are supported for base color/roughness/metalness.
+- **Instancing**: Maya DAG instances whose world transform is rigid (translate/rotate/uniform-scale) share one object-space mesh and BVH across all instances — genuine GPU-memory-shared instancing, not per-instance geometry copies. Instances with shear or non-uniform scale (which Mirage's transform can't represent) fall back to a baked private copy. MASH's Instancer node and nParticle instancing (Maya's native `instancer` DAG node) are translated separately via Mirage's own procedural point-instancer (see Limitations for its single-prototype v1 scope).
+- **Motion blur**: rigid-transform blur (two time-sampled transforms) for every instance, plus deforming (2-keyframe) per-vertex blur for meshes with deformer history (skinCluster/blendShape/etc. — auto-detected, no extra setup needed) via Mirage's per-primitive vertex snapshot. The two compose independently.
+- **Materials**: `standardSurface` (primary target — base color, metalness, roughness, specular, coat, sheen, transmission, subsurface, emission, IOR, opacity) plus legacy Lambert/Blinn/Phong. Connected `file` textures are supported for base color/roughness/metalness/opacity, plus tangent-space normal maps via the standard `file → bump2d (Tangent Space Normals) → normalCamera` network.
 - **Lights**: point, spot, directional, area, and ambient. Mirage has no native point/spot/directional light type — see Limitations.
+- **Output**: 8-bit PNG/JPG/BMP/TGA, plus 32-bit float EXR (preserves full render dynamic range, no tonemapping/quantization).
 
 ## Limitations
 
@@ -68,17 +69,17 @@ Mirage's own light model is just a sky gradient plus emissive geometry — there
 
 Other known gaps:
 
-- No opacity/cutout transparency — `Mirage::Material` has no such field; non-opaque materials render fully opaque (a warning is logged once per scene).
-- No bump/normal mapping — unverified whether it's wired into Mirage's shading at all.
-- No EXR/32-bit-float output — only 8-bit PNG/JPG/BMP/TGA (the only image writer in the Mirage codebase family).
+- Opacity is stochastic cutout (a surface is either fully there or fully not, per sample), not alpha blending — there's no partial-coverage/soft-edge transparency.
+- Normal mapping is tangent-space only and requires the mesh to have UVs; object-space normal maps and classic height-field bump aren't supported.
 - No Viewport 2.0 / interactive-viewport IPR — interactivity is via the classic, progressive Render View only.
-- No MASH/particle-instancer support, only regular DAG instancing.
+- MASH/particle-instancer translation is single-prototype, single-material only: an `instancer` node referencing more than one prototype object (or a multi-shading-group prototype mesh) only translates its first mesh prototype's geometry and first-found material, with a once-per-instancer warning — matches Mirage's own `PointInstancer` v1 scope (see `PointInstancer.h`). Instancer prototype objects are also not hidden automatically by this plugin the way Maya's own viewport does, so a visible (non-hidden) prototype renders both as itself and as every instanced copy.
 - Per-instance shading-group overrides on an instanced shape aren't supported — shading is queried once and applied to all instances of that shape.
+- Deforming motion blur doesn't deform shading normals (still barycentric-interpolated from the static, start-of-shutter normals regardless of ray time) — a Mirage v1 scope limit on hit-position/silhouette motion, not shading quality.
 
 ## Architecture
 
 - `RenderProcedure` (`MPxCommand`) parses the classic-renderer invocation and drives scene translation; it is destroyed by Maya immediately after `doIt()` returns (non-undoable commands aren't retained), so nothing that needs to outlive a single call lives here.
 - `RenderWorker` is a long-lived singleton owning the `RenderSession` (Mirage `Scene` + active `Renderer` backend) and the background render thread — it has to be a singleton independent of `RenderProcedure`'s lifetime for exactly the reason above.
 - `RenderSession` handles CPU/GPU backend selection (with automatic fallback) and recreate-gating (Mirage has no scene-dirty-tracking of its own; structural changes require rebuilding the renderer).
-- `translators/` (`SceneTranslator`, `MeshTranslator`, `MaterialTranslator`, `LightTranslator`, `MayaTransformUtils`) walk the DAG once per render and translate meshes, materials, and lights into the scene.
-- `ImageWriter` handles 8-bit file output for batch rendering.
+- `translators/` (`SceneTranslator`, `MeshTranslator`, `MaterialTranslator`, `LightTranslator`, `InstancerTranslator`, `MayaTransformUtils`) walk the DAG once per render and translate meshes, materials, lights, and particle/MASH instancers into the scene.
+- `ImageWriter` handles 8-bit (PNG/JPG/BMP/TGA) and 32-bit float (EXR) file output for batch rendering.

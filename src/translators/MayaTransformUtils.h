@@ -2,6 +2,10 @@
 
 #include <maya/MMatrix.h>
 #include <maya/MDagPath.h>
+#include <maya/MDGContextGuard.h>
+#include <maya/MDGContext.h>
+#include <maya/MAnimControl.h>
+#include <maya/MTime.h>
 
 #include <mirage/math/Transform.h>
 
@@ -37,14 +41,15 @@ struct DecomposedTransform
 // Mirage::Transform, no further conversion needed.
 DecomposedTransform DecomposeMayaMatrix(const MMatrix &worldMatrix);
 
-// Rigid-transform motion blur settings, in the form the translators need:
-// two frame offsets (relative to whatever frame is currently being
-// rendered) defining a shutter interval. Not the same thing as
-// Mirage::Camera::shutterStart/End, which stay a fixed [0,1] once motion
-// blur is enabled - see RenderProcedure::translateCamera(). Deforming/
-// skinned-mesh motion blur is out of scope: Mirage::Mesh has a single
-// vertex buffer with no way to represent geometry moving between shutter
-// samples, only a whole object's rigid transform moving.
+// Motion blur settings, in the form the translators need: two frame offsets
+// (relative to whatever frame is currently being rendered) defining a
+// shutter interval. Not the same thing as Mirage::Camera::shutterStart/End,
+// which stay a fixed [0,1] once motion blur is enabled - see
+// RenderProcedure::translateCamera(). Every DAG instance gets rigid-
+// transform blur (see DecomposeMayaMatrix/SampleWorldMatrixAt below); meshes
+// with deformer history additionally get per-vertex deforming blur (Mirage
+// v1.1.0's Mesh::verticesEnd - see HasUpstreamDeformer and MeshTranslator.cpp)
+// - the two are independent and both apply when both are present.
 struct MotionBlurSettings
 {
 	bool enabled = false;
@@ -59,3 +64,36 @@ struct MotionBlurSettings
 // returns path.inclusiveMatrix() directly (no context-switching overhead
 // for the common non-motion-blurred case).
 MMatrix SampleWorldMatrixAt(const MDagPath &path, double frameOffset);
+
+// Runs `fn` with Maya's current time temporarily shifted by `frameOffset`
+// (frame units), restoring it afterwards - the same MDGContextGuard-based
+// "sample at another time" mechanism SampleWorldMatrixAt uses above,
+// factored out as a template so callers that need more than just a world
+// matrix out of the sampled time (e.g. MeshTranslator's deforming-vertex
+// position sampling) can reuse the exact same, already-verified context-
+// switching idiom instead of re-deriving it (see SampleWorldMatrixAt's own
+// comment about the MDGContextGuard-construction most-vexing-parse pitfall).
+template <typename Fn>
+void WithTimeOffset(double frameOffset, Fn &&fn)
+{
+	if (frameOffset == 0.0)
+	{
+		fn();
+		return;
+	}
+
+	const MTime current = MAnimControl::currentTime();
+	const MTime sampleTime(current.value() + frameOffset, MTime::uiUnit());
+	const MDGContext context(sampleTime);
+	MDGContextGuard guard(context);
+	fn();
+}
+
+// True if `shapePath`'s construction history has any deformer (skinCluster,
+// blendShape, cluster, wire, lattice, ... - anything deriving from Maya's
+// geometryFilter base type) upstream of it. Used to gate the extra cost of
+// deforming (2-keyframe) vertex motion blur (Mirage v1.1.0's
+// Mesh::verticesEnd) to meshes that can actually deform between shutter
+// samples - a rigid/static mesh re-sampled at shutter-close would just
+// waste time producing verticesEnd identical to vertices.
+bool HasUpstreamDeformer(const MDagPath &shapePath);
