@@ -1,3 +1,15 @@
+# Mirage's `Mirage` target is a STATIC library that links OpenMP::OpenMP_CXX
+# PRIVATE (see mirage/CMakeLists.txt) when OpenMP is found at Mirage's own
+# build time - true for the Linux release tarball (GCC's OpenMP is found for
+# free), not necessarily the macOS one (Apple Clang needs extra hints
+# find_package(OpenMP) doesn't supply automatically). CMake's export logic
+# for STATIC libraries re-exposes PRIVATE link dependencies to consumers
+# (wrapped in $<LINK_ONLY:...>) since a .a doesn't pull its own dependencies
+# in at link time - so MirageConfig.cmake's set_target_properties() call
+# needs OpenMP::OpenMP_CXX to already exist. Find it first, quietly: this is
+# a consumer-side requirement of linking a static library, not a Mirage bug,
+# and it's a no-op wherever Mirage itself didn't link OpenMP.
+find_package(OpenMP)
 find_package(Mirage CONFIG REQUIRED)
 find_package(Maya REQUIRED)
 include_directories(${MAYA_INCLUDE_DIR})

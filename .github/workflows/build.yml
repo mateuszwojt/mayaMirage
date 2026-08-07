@@ -1,0 +1,184 @@
+name: Build
+
+# Reusable matrix build shared by ci.yml (validation) and release.yml
+# (publishing). See README.md's "CI / Releases" section for the secrets this
+# expects.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >
+          Version string baked into artifact names (e.g. a git tag).
+          Defaults to the short commit SHA when not provided.
+        required: false
+        type: string
+        default: ""
+    outputs:
+      version:
+        description: The resolved version string actually used for artifact names.
+        value: ${{ jobs.build.outputs.version }}
+
+jobs:
+  build:
+    name: maya${{ matrix.maya_version }} / ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - maya_version: "2026"
+            os: macos
+            arch: arm64
+            runner: macos-14
+            plugin_ext: .bundle
+            mirage_os_arch: macos-arm64
+            devkit_asset: Autodesk_Maya_2026_DEVKIT_Mac.dmg
+          - maya_version: "2027"
+            os: macos
+            arch: arm64
+            runner: macos-14
+            plugin_ext: .bundle
+            mirage_os_arch: macos-arm64
+            devkit_asset: Autodesk_Maya_2027_DEVKIT_Mac.dmg
+          - maya_version: "2026"
+            os: linux
+            arch: x86_64
+            runner: ubuntu-24.04
+            plugin_ext: .so
+            mirage_os_arch: linux-x86_64
+            devkit_asset: Autodesk_Maya_2026_DEVKIT_Linux.tgz
+          - maya_version: "2027"
+            os: linux
+            arch: x86_64
+            runner: ubuntu-24.04
+            plugin_ext: .so
+            mirage_os_arch: linux-x86_64
+            devkit_asset: Autodesk_Maya_2027_DEVKIT_Linux.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version string
+        id: version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version="$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Vulkan loader/headers (macOS)
+        if: matrix.os == 'macos'
+        run: brew install vulkan-headers vulkan-loader molten-vk
+
+      - name: Install Vulkan loader/headers (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev libx11-dev libxrandr-dev
+
+      # Maya devkit archives are proprietary Autodesk downloads and are not
+      # publicly fetchable. They're stored, under Autodesk's own download
+      # names, as assets on the `devkits` release in a private GitHub repo,
+      # pulled here via a fine-grained PAT (MAYA_DEVKIT_PAT). The macOS asset
+      # is a .dmg disk image; Linux's is a plain .tgz. Neither archive's
+      # internal layout is assumed - both are searched for wherever
+      # include/maya/MFn.h actually ends up, since Autodesk wraps the devkit
+      # in an inner folder whose name isn't guaranteed to be "devkitBase".
+      - name: Fetch Maya devkit
+        env:
+          GH_TOKEN: ${{ secrets.MAYA_DEVKIT_PAT }}
+        run: |
+          set -euo pipefail
+          download_dir="${{ runner.temp }}/devkit-download"
+          devkit_dir="${{ runner.temp }}/devkit"
+          mkdir -p "$download_dir" "$devkit_dir"
+
+          gh release download devkits \
+            --repo mateuszwojt/maya-devkits \
+            --pattern "${{ matrix.devkit_asset }}" \
+            --dir "$download_dir"
+
+          asset="$download_dir/${{ matrix.devkit_asset }}"
+          mounted=""
+          case "$asset" in
+            *.dmg)
+              root="${{ runner.temp }}/devkit-mount"
+              hdiutil attach "$asset" -mountpoint "$root" -nobrowse -quiet
+              mounted="$root"
+              ;;
+            *.tgz|*.tar.gz)
+              root="${{ runner.temp }}/devkit-extract"
+              mkdir -p "$root"
+              tar -xzf "$asset" -C "$root"
+              ;;
+            *)
+              echo "::error::unrecognized Maya devkit archive type: $asset"
+              exit 1
+              ;;
+          esac
+
+          mfn_path="$(find "$root" -maxdepth 6 -type f -path '*/include/maya/MFn.h' -print -quit)"
+          if [ -z "$mfn_path" ]; then
+            echo "::error::could not locate include/maya/MFn.h under $root (unpacked from $asset)"
+            exit 1
+          fi
+          src="$(dirname "$(dirname "$(dirname "$mfn_path")")")"
+          cp -R "$src"/. "$devkit_dir"/
+
+          if [ -n "$mounted" ]; then
+            hdiutil detach "$mounted" -quiet
+          fi
+
+          echo "DEVKIT_LOCATION=$devkit_dir" >> "$GITHUB_ENV"
+
+      # Mirage publishes public per-OS/arch install tarballs on its own
+      # GitHub Releases; the exact version consumed here is pinned via the
+      # checked-in MIRAGE_VERSION file so bumping it is a reviewable one-line
+      # change rather than silently floating to "latest".
+      - name: Fetch Mirage
+        run: |
+          mirage_version="$(cat MIRAGE_VERSION)"
+          mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.tar.gz"
+          mkdir -p "${{ runner.temp }}/mirage"
+          curl -fL -o "${{ runner.temp }}/${mirage_asset}" \
+            "https://github.com/mateuszwojt/Mirage/releases/download/${mirage_version}/${mirage_asset}"
+          tar -xzf "${{ runner.temp }}/${mirage_asset}" -C "${{ runner.temp }}/mirage"
+          echo "MIRAGE_INSTALL_DIR=${{ runner.temp }}/mirage" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DMAYA_VERSION=${{ matrix.maya_version }} \
+            -DMirage_DIR="${MIRAGE_INSTALL_DIR}/lib/cmake/Mirage" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      # Not `cmake --install`: the root CMakeLists.txt's install() rules use
+      # an absolute, non-relocatable ${Maya_HOME_DIR} destination (the real
+      # per-user Maya prefs dir), so `--prefix` can't redirect it. Stage the
+      # release layout by hand instead.
+      - name: Stage package
+        run: |
+          stage="${{ runner.temp }}/stage"
+          mkdir -p "$stage/plug-ins" "$stage/scripts"
+          cp "build/src/MirageMaya${{ matrix.plugin_ext }}" "$stage/plug-ins/"
+          cp -R scripts/MirageMaya "$stage/scripts/"
+          echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
+          echo "ARCHIVE_NAME=MirageMaya-${{ steps.version.outputs.version }}-maya${{ matrix.maya_version }}-${{ matrix.os }}-${{ matrix.arch }}" >> "$GITHUB_ENV"
+
+      - name: Archive
+        run: |
+          cd "$STAGE_DIR"
+          zip -r "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}.zip
+          if-no-files-found: error
