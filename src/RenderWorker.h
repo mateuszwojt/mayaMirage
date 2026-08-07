@@ -98,18 +98,6 @@ private:
 	void OnIdle();
 	static void OnIdleCallback(void *clientData);
 
-	// Backend-aware resolve of one raw Mirage::Color accumulation sample
-	// into a linear, displayable color. CPU and GPU backends resolve their
-	// output completely differently (see RenderSession/mirage's own
-	// Renderer.h docs): the CPU backend accumulates additively into .x/.y/.z
-	// with .w as a running sample-weight the caller must divide out, while
-	// VulkanRenderer already resolves its own persistent GPU-side
-	// accumulation buffer into an already-averaged .x/.y/.z on every call -
-	// dividing by .w again there would double-resolve and darken the image.
-	// Used by both the interactive (Render View) and batch (file output)
-	// paths, so there's exactly one place this asymmetry is handled.
-	static Mirage::Color ResolveBackendPixel(const Mirage::Color &raw, bool isGpuBackend);
-
 	void PushPixelsToRenderView(const std::vector<Mirage::Color> &pixels, int width, int height);
 
 	// Pushes AOV buffers (already backend-resolved) into the Render View's

@@ -121,7 +121,7 @@ void RenderProcedure::preRender()
 	// accumulates entirely into that caller-owned buffer) already restarts
 	// cleanly on its own. The GPU (Vulkan) backend does not: it keeps its
 	// own persistent accumulation buffer alive *inside the Renderer object*
-	// across calls (see RenderWorker::ResolveBackendPixel's comment), and
+	// across calls (see RenderWorker::ThreadMain's comment), and
 	// PrepareRenderer() only recreates that object when something
 	// structural actually changed (backend/dimensions/scene version) - a
 	// second click with identical settings reuses the same instance and its
