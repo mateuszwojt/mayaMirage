@@ -3,6 +3,7 @@
 #include <maya/MPxNode.h>
 
 #include <mirage/core/Renderer.h>
+#include <mirage/utils/Util.h>
 
 #include "../ImageWriter.h"
 
@@ -88,10 +89,12 @@ public:
 
 	static SkySettings getSkySettings();
 
-	// Which of Mirage's AOVs (depth/normal/primId - all single-valued
-	// first-hit snapshots, not progressively accumulated like the beauty
-	// image, see mirage/core/Renderer.h) to request. Folded directly into
-	// Mirage::Options::aovMask, which is a real field on Options already.
+	// Which of Mirage's AOVs (depth/normal/primId/albedo - all single-valued
+	// first-hit snapshots by default, see mirage/core/Renderer.h;
+	// DefaultOptions() turns on Options::accumulateAovs so depth/normal/
+	// albedo progressively converge instead on the CPU backend, primId
+	// excepted) to request. Folded directly into Mirage::Options::aovMask,
+	// which is a real field on Options already.
 	static uint32_t getAovMask();
 
 	// PNG/JPG/BMP/TGA/EXR - see ImageWriter.h for why the list stops there.
@@ -101,12 +104,29 @@ public:
 	// formats (DPX, Cineon, ...) Mirage still categorically can't produce.
 	static ImageOutputFormat getOutputImageFormat();
 
+	// Display transform applied (via Mirage v1.3.0's Mirage::ApplyViewTransform,
+	// mirage/utils/Util.h) to LDR batch output and the interactive Render
+	// View preview alike - EXR output stays raw/untonemapped regardless (see
+	// ImageWriter.h). Not folded into Mirage::Options - like
+	// getOutputImageFormat() above, it's an output-facing setting Options
+	// itself has no field for. Default is eFilmic, matching this plugin's
+	// pre-1.3.0 always-filmic behavior.
+	static Mirage::ViewTransform getViewTransform();
+
 	// Global escape hatch forcing MeshTranslator's always-bake fallback
 	// path for every instance, even rigid+uniform-scale ones that would
 	// otherwise share one object-space Mesh (see MeshTranslator.h) - useful
 	// for isolating instancing-related bugs without needing a per-object
 	// override mechanism.
 	static bool getEnableInstancing();
+
+	// Mirage v1.3.0's post-process Non-Local-Means denoise
+	// (mirage/filter/NLM.h), using nlmWidth/nlmFalloff below plus the
+	// albedo/normal AOVs as cross-bilateral guide buffers (requested
+	// automatically when this is on, even if their own AOV checkboxes are
+	// off - see RenderWorker.cpp). false by default: NonLocalMeansFilter is
+	// never called.
+	static bool getEnableDenoise();
 
 private:
 	static MObject gRenderType;
@@ -125,11 +145,14 @@ private:
     static MObject gEnableDepthAOV;
     static MObject gEnableNormalAOV;
     static MObject gEnablePrimIdAOV;
+    static MObject gEnableAlbedoAOV;
     static MObject gOutputImageFormat;
+    static MObject gViewTransform;
     static MObject gEnableInstancing;
     static MObject gSkyType;
     static MObject gSkyTurbidity;
 
+	static MObject gEnableDenoise;
 	static MObject gNLMWidth;
     static MObject gNLMFalloff;
 };

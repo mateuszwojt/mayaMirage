@@ -2,7 +2,11 @@
 #include "ImageWriter.h"
 #include "nodes/RenderGlobals.h"
 
+#include <mirage/filter/NLM.h>
+
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include <maya/MEventMessage.h>
 #include <maya/MGlobal.h>
@@ -62,21 +66,34 @@ void RenderWorker::StartRender(const Mirage::Camera &camera, const Mirage::Optio
 
 	m_camera = camera;
 	m_options = options;
+	m_requestedAovMask = options.aovMask;
+	m_viewTransform = RenderGlobalsNode::getViewTransform();
 	m_cancelRequested.store(false);
 	m_completedSamples.store(0);
 	m_lastPushedSamples = -1;
 
+	// NLM denoise (mirage/filter/NLM.h) uses the albedo/normal AOVs as
+	// cross-bilateral guide buffers - request them from Render() even if
+	// the user didn't check their own AOV boxes. m_requestedAovMask above
+	// (captured before this) is what the Render View's AOV channel
+	// selector actually shows, so a guide-only buffer never appears there
+	// as a phantom AOV.
+	const uint32_t guideMask = options.enableDenoise ? (Mirage::kAovAlbedo | Mirage::kAovNormal) : 0u;
+	m_options.aovMask |= guideMask;
+
 	const size_t pixelCount = static_cast<size_t>(options.width) * static_cast<size_t>(options.height);
 	m_workingPixels.assign(pixelCount, Mirage::Color());
-	m_workingDepth.assign((options.aovMask & Mirage::kAovDepth) ? pixelCount : 0, Mirage::Color());
-	m_workingNormal.assign((options.aovMask & Mirage::kAovNormal) ? pixelCount : 0, Mirage::Color());
-	m_workingPrimId.assign((options.aovMask & Mirage::kAovPrimId) ? pixelCount : 0, Mirage::Color());
+	m_workingDepth.assign((m_options.aovMask & Mirage::kAovDepth) ? pixelCount : 0, Mirage::Color());
+	m_workingNormal.assign((m_options.aovMask & Mirage::kAovNormal) ? pixelCount : 0, Mirage::Color());
+	m_workingPrimId.assign((m_options.aovMask & Mirage::kAovPrimId) ? pixelCount : 0, Mirage::Color());
+	m_workingAlbedo.assign((m_options.aovMask & Mirage::kAovAlbedo) ? pixelCount : 0, Mirage::Color());
 	{
 		std::lock_guard<std::mutex> lock(m_bufferMutex);
 		m_latestPixels.assign(pixelCount, Mirage::Color());
 		m_latestDepth.assign(m_workingDepth.size(), Mirage::Color());
 		m_latestNormal.assign(m_workingNormal.size(), Mirage::Color());
 		m_latestPrimId.assign(m_workingPrimId.size(), Mirage::Color());
+		m_latestAlbedo.assign(m_workingAlbedo.size(), Mirage::Color());
 	}
 
 	m_computation.beginComputation(/*showProgressBar=*/true);
@@ -101,7 +118,8 @@ void RenderWorker::ThreadMain()
 	aovBuffers.depth = m_workingDepth.empty() ? nullptr : m_workingDepth.data();
 	aovBuffers.normal = m_workingNormal.empty() ? nullptr : m_workingNormal.data();
 	aovBuffers.primId = m_workingPrimId.empty() ? nullptr : m_workingPrimId.data();
-	const bool wantAovs = (aovBuffers.depth || aovBuffers.normal || aovBuffers.primId);
+	aovBuffers.albedo = m_workingAlbedo.empty() ? nullptr : m_workingAlbedo.data();
+	const bool wantAovs = (aovBuffers.depth || aovBuffers.normal || aovBuffers.primId || aovBuffers.albedo);
 
 	// CPU and GPU backends have genuinely different Render() call contracts
 	// (see mirage/core/Renderer.cpp's CpuRenderer::Render() vs
@@ -137,6 +155,7 @@ void RenderWorker::ThreadMain()
 					m_latestDepth = m_workingDepth;
 					m_latestNormal = m_workingNormal;
 					m_latestPrimId = m_workingPrimId;
+					m_latestAlbedo = m_workingAlbedo;
 				}
 			}
 		}
@@ -170,17 +189,18 @@ void RenderWorker::OnIdle()
 
 	if (samples > m_lastPushedSamples)
 	{
-		std::vector<Mirage::Color> pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot;
+		std::vector<Mirage::Color> pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot, albedoSnapshot;
 		{
 			std::lock_guard<std::mutex> lock(m_bufferMutex);
 			pixelSnapshot = m_latestPixels;
 			depthSnapshot = m_latestDepth;
 			normalSnapshot = m_latestNormal;
 			primIdSnapshot = m_latestPrimId;
+			albedoSnapshot = m_latestAlbedo;
 		}
 		PushPixelsToRenderView(pixelSnapshot, m_options.width, m_options.height);
-		PushAovsToRenderView(0, m_options.width - 1, 0, m_options.height - 1, m_options.aovMask,
-							 depthSnapshot, normalSnapshot, primIdSnapshot);
+		PushAovsToRenderView(0, m_options.width - 1, 0, m_options.height - 1, m_requestedAovMask,
+							 pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot, albedoSnapshot);
 		m_lastPushedSamples = samples;
 	}
 
@@ -215,17 +235,37 @@ void RenderWorker::FinishRender()
 	// between the progress push above and this check, so the Render View
 	// always ends up showing the truly-final buffer, not a slightly stale one.
 	{
-		std::vector<Mirage::Color> pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot;
+		std::vector<Mirage::Color> pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot, albedoSnapshot;
 		{
 			std::lock_guard<std::mutex> lock(m_bufferMutex);
 			pixelSnapshot = m_latestPixels;
 			depthSnapshot = m_latestDepth;
 			normalSnapshot = m_latestNormal;
 			primIdSnapshot = m_latestPrimId;
+			albedoSnapshot = m_latestAlbedo;
 		}
+
+		// NLM denoise (mirage/filter/NLM.h), applied exactly once here on
+		// the truly-final resolved frame - not per progressive tick in
+		// OnIdle above, since it's comparatively expensive. guideAlbedo/
+		// guideNormal are whatever albedo/normal buffers this render
+		// populated, whether the user asked for them as visible AOVs or
+		// StartRender() force-requested them as denoise guides only -
+		// either way they're already correctly resolved here.
+		if (m_options.enableDenoise && !pixelSnapshot.empty())
+		{
+			std::vector<Mirage::Color> denoised(pixelSnapshot.size());
+			const int radius = std::max(1, static_cast<int>(std::lround(m_options.nlmWidth)));
+			const Mirage::Color *guideAlbedo = albedoSnapshot.empty() ? nullptr : albedoSnapshot.data();
+			const Mirage::Color *guideNormal = normalSnapshot.empty() ? nullptr : normalSnapshot.data();
+			Mirage::NonLocalMeansFilter(pixelSnapshot.data(), denoised.data(), m_options.width, m_options.height,
+										 m_options.nlmFalloff, radius, guideAlbedo, guideNormal);
+			pixelSnapshot = std::move(denoised);
+		}
+
 		PushPixelsToRenderView(pixelSnapshot, m_options.width, m_options.height);
-		PushAovsToRenderView(0, m_options.width - 1, 0, m_options.height - 1, m_options.aovMask,
-							 depthSnapshot, normalSnapshot, primIdSnapshot);
+		PushAovsToRenderView(0, m_options.width - 1, 0, m_options.height - 1, m_requestedAovMask,
+							 pixelSnapshot, depthSnapshot, normalSnapshot, primIdSnapshot, albedoSnapshot);
 	}
 
 	MRenderView::endRender();
@@ -262,11 +302,15 @@ void RenderWorker::PushPixelsToRenderView(const std::vector<Mirage::Color> &pixe
 		const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
 		for (int x = 0; x < width; ++x)
 		{
-			const Mirage::Color &resolved = pixels[srcRowStart + x];
+			// Mirage::ApplyViewTransform (mirage/utils/Util.h, v1.3.0) applies
+			// exposure then the selected display transform, so the
+			// interactive preview matches batch output's ImageWriter call
+			// instead of showing raw, untonemapped linear values.
+			const Mirage::Color display = Mirage::ApplyViewTransform(pixels[srcRowStart + x], m_viewTransform, m_options.exposure);
 			RV_PIXEL &out = outPixels[dstRowStart + x];
-			out.r = resolved.x * 255.0f;
-			out.g = resolved.y * 255.0f;
-			out.b = resolved.z * 255.0f;
+			out.r = display.x * 255.0f;
+			out.g = display.y * 255.0f;
+			out.b = display.z * 255.0f;
 			out.a = 255.0f;
 		}
 	}
@@ -344,14 +388,35 @@ namespace
 			}
 		}
 	}
+
+	// Mirage v1.3.0's kAovAlbedo - already a ~[0,1] resolved base color, not
+	// a signed direction like normal, so a direct copy (no *0.5+0.5 remap).
+	void FillAlbedoAov(const std::vector<Mirage::Color> &albedo, std::vector<float> &outChannels, int width, int height)
+	{
+		outChannels.resize(albedo.size() * 3);
+		for (int y = 0; y < height; ++y)
+		{
+			const size_t srcRowStart = static_cast<size_t>(y) * width;
+			const size_t dstRowStart = static_cast<size_t>(height - 1 - y) * width;
+			for (int x = 0; x < width; ++x)
+			{
+				const Mirage::Color &a = albedo[srcRowStart + x];
+				const size_t dst = (dstRowStart + x) * 3;
+				outChannels[dst + 0] = a.x;
+				outChannels[dst + 1] = a.y;
+				outChannels[dst + 2] = a.z;
+			}
+		}
+	}
 }
 
 void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, unsigned int bottom, unsigned int top,
-										  uint32_t aovMask, const std::vector<Mirage::Color> &depth,
-										  const std::vector<Mirage::Color> &normal, const std::vector<Mirage::Color> &primId)
+										  uint32_t aovMask, const std::vector<Mirage::Color> &beauty,
+										  const std::vector<Mirage::Color> &depth, const std::vector<Mirage::Color> &normal,
+										  const std::vector<Mirage::Color> &primId, const std::vector<Mirage::Color> &albedo)
 {
 	std::vector<RV_AOV> aovs;
-	std::vector<float> depthChannels, normalChannels, primIdChannels;
+	std::vector<float> depthChannels, normalChannels, primIdChannels, albedoChannels;
 
 	if ((aovMask & Mirage::kAovDepth) && !depth.empty())
 	{
@@ -368,34 +433,37 @@ void RenderWorker::PushAovsToRenderView(unsigned int left, unsigned int right, u
 		FillPrimIdAov(primId, primIdChannels, m_options.width, m_options.height);
 		aovs.push_back(RV_AOV{1, MString("primId"), primIdChannels.data()});
 	}
+	if ((aovMask & Mirage::kAovAlbedo) && !albedo.empty())
+	{
+		FillAlbedoAov(albedo, albedoChannels, m_options.width, m_options.height);
+		aovs.push_back(RV_AOV{3, MString("albedo"), albedoChannels.data()});
+	}
 
 	if (aovs.empty())
 		return;
 
-	// Re-push the beauty buffer alongside the AOVs in the same call, since
-	// updatePixels()'s AOV parameters are additional arguments to the same
-	// call that sends the main image, not a separate call.
-	std::vector<Mirage::Color> pixelSnapshot;
-	{
-		std::lock_guard<std::mutex> lock(m_bufferMutex);
-		pixelSnapshot = m_latestPixels;
-	}
-	if (pixelSnapshot.empty())
+	if (beauty.empty())
 		return;
 
-	// Same bottom-up flip as PushPixelsToRenderView - see its comment.
-	std::vector<RV_PIXEL> outPixels(pixelSnapshot.size());
+	// Re-push the beauty buffer alongside the AOVs in the same call, since
+	// updatePixels()'s AOV parameters are additional arguments to the same
+	// call that sends the main image, not a separate call. Same view
+	// transform/exposure and bottom-up flip as PushPixelsToRenderView - see
+	// its comments - applied to whatever `beauty` the caller already
+	// resolved (post-denoise, if enabled), not re-fetched independently
+	// here.
+	std::vector<RV_PIXEL> outPixels(beauty.size());
 	for (int y = 0; y < m_options.height; ++y)
 	{
 		const size_t srcRowStart = static_cast<size_t>(y) * m_options.width;
 		const size_t dstRowStart = static_cast<size_t>(m_options.height - 1 - y) * m_options.width;
 		for (int x = 0; x < m_options.width; ++x)
 		{
-			const Mirage::Color &resolved = pixelSnapshot[srcRowStart + x];
+			const Mirage::Color display = Mirage::ApplyViewTransform(beauty[srcRowStart + x], m_viewTransform, m_options.exposure);
 			RV_PIXEL &out = outPixels[dstRowStart + x];
-			out.r = resolved.x * 255.0f;
-			out.g = resolved.y * 255.0f;
-			out.b = resolved.z * 255.0f;
+			out.r = display.x * 255.0f;
+			out.g = display.y * 255.0f;
+			out.b = display.z * 255.0f;
 			out.a = 255.0f;
 		}
 	}
@@ -411,6 +479,31 @@ void RenderWorker::RenderBatchSynchronous(const Mirage::Camera &camera, const Mi
 	const size_t pixelCount = static_cast<size_t>(options.width) * static_cast<size_t>(options.height);
 	std::vector<Mirage::Color> pixels(pixelCount, Mirage::Color());
 
+	// NLM denoise (mirage/filter/NLM.h) needs albedo/normal as
+	// cross-bilateral guide buffers regardless of whether the AOV
+	// checkboxes that would otherwise request them are on - a local
+	// options copy since `options` is caller-owned. Unlike the interactive
+	// path (RenderWorker::StartRender/ThreadMain), this function previously
+	// requested no AOV buffers at all - harmless while nothing read them,
+	// but load-bearing now that denoise needs them.
+	Mirage::Options localOptions = options;
+	const uint32_t guideMask = options.enableDenoise ? (Mirage::kAovAlbedo | Mirage::kAovNormal) : 0u;
+	localOptions.aovMask |= guideMask;
+
+	Mirage::AovBuffers aovs;
+	std::vector<Mirage::Color> albedoBuf, normalBuf;
+	if (localOptions.aovMask & Mirage::kAovAlbedo)
+	{
+		albedoBuf.assign(pixelCount, Mirage::Color());
+		aovs.albedo = albedoBuf.data();
+	}
+	if (localOptions.aovMask & Mirage::kAovNormal)
+	{
+		normalBuf.assign(pixelCount, Mirage::Color());
+		aovs.normal = normalBuf.data();
+	}
+	Mirage::AovBuffers *aovsPtr = (localOptions.aovMask != 0) ? &aovs : nullptr;
+
 	const bool isGpu = (session.GetActiveBackend() == Mirage::eGpu);
 
 	// Same backend-aware call count as ThreadMain (see its comment): GPU
@@ -419,14 +512,28 @@ void RenderWorker::RenderBatchSynchronous(const Mirage::Camera &camera, const Mi
 	// and fully resolves `pixels` before returning.
 	if (isGpu)
 	{
-		for (int i = 0; i < options.maxSamples; ++i)
+		for (int i = 0; i < localOptions.maxSamples; ++i)
 		{
-			renderer->Render(camera, options, pixels.data());
+			renderer->Render(camera, localOptions, pixels.data(), aovsPtr);
 		}
 	}
 	else
 	{
-		renderer->Render(camera, options, pixels.data());
+		renderer->Render(camera, localOptions, pixels.data(), aovsPtr);
+	}
+
+	// Denoise once on the fully-resolved beauty buffer, same as the
+	// interactive path's RenderWorker::FinishRender - NonLocalMeansFilter's
+	// in/out may not alias, so filter into a separate buffer and move it back.
+	if (options.enableDenoise)
+	{
+		std::vector<Mirage::Color> denoised(pixels.size());
+		const int radius = std::max(1, static_cast<int>(std::lround(options.nlmWidth)));
+		const Mirage::Color *guideAlbedo = albedoBuf.empty() ? nullptr : albedoBuf.data();
+		const Mirage::Color *guideNormal = normalBuf.empty() ? nullptr : normalBuf.data();
+		Mirage::NonLocalMeansFilter(pixels.data(), denoised.data(), options.width, options.height,
+									 options.nlmFalloff, radius, guideAlbedo, guideNormal);
+		pixels = std::move(denoised);
 	}
 
 	// Resolve the output path/format/frame padding via Maya's own Common
@@ -452,5 +559,6 @@ void RenderWorker::RenderBatchSynchronous(const Mirage::Camera &camera, const Mi
 		return;
 	}
 
-	ImageWriter::WriteImage(imagePath.asChar(), pixels, options.width, options.height, format);
+	const Mirage::ViewTransform viewTransform = RenderGlobalsNode::getViewTransform();
+	ImageWriter::WriteImage(imagePath.asChar(), pixels, options.width, options.height, format, viewTransform, options.exposure);
 }

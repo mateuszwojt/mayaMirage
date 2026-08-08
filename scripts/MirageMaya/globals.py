@@ -221,6 +221,14 @@ def create_render_globals_tab():
         label = "Prim ID",
         attribute = "defaultMirageRenderGlobals.enablePrimIdAOV")
 
+    cmds.attrControlGrp(
+        "mirageEnableAlbedoAOV",
+        label = "Albedo",
+        annotation = "Mirage v1.3.0's resolved (texture-sampled) base color at the primary hit. Also "
+                     "used as an NLM denoise guide buffer when Denoise is enabled, whether or not "
+                     "this box is checked.",
+        attribute = "defaultMirageRenderGlobals.enableAlbedoAOV")
+
     cmds.setParent("..")
 
     # = Output =
@@ -236,6 +244,17 @@ def create_render_globals_tab():
         columnWidth = (3, 160),
         columnAttach= (1, "left", 4),
         attribute = "defaultMirageRenderGlobals.outputImageFormat")
+
+    cmds.attrEnumOptionMenuGrp(
+        "mirageViewTransform",
+        label = "View Transform",
+        annotation = "Mirage v1.3.0 display transform applied at write time (batch output) and in "
+                     "the Render View preview alike: None (raw linear, only sensible for EXR), "
+                     "Filmic, ACES-like, or plain sRGB Display. EXR output always stays raw "
+                     "regardless of this setting.",
+        columnWidth = (3, 160),
+        columnAttach= (1, "left", 4),
+        attribute = "defaultMirageRenderGlobals.viewTransform")
 
     cmds.setParent("..")
 
@@ -255,11 +274,20 @@ def create_render_globals_tab():
 
     cmds.setParent("..")
 
-    # = NLM Filtering =
+    # = Denoise (NLM) =
 
-    cmds.frameLayout("nlmFrameLayout", label="NLM", collapsable=True, collapse=True)
+    cmds.frameLayout("nlmFrameLayout", label="Denoise (NLM)", collapsable=True, collapse=True)
 
     cmds.separator(height=2)
+
+    cmds.attrControlGrp(
+        "mirageEnableDenoise",
+        label = "Enable Denoise",
+        annotation = "Mirage v1.3.0's post-process Non-Local-Means denoise, applied once to the "
+                     "final resolved frame (interactive) or the batch-rendered frame, using the "
+                     "albedo/normal AOVs as edge-aware guide buffers automatically - their own AOV "
+                     "checkboxes above don't need to be on for this to work.",
+        attribute = "defaultMirageRenderGlobals.enableDenoise")
 
     cmds.attrFieldSliderGrp(
         "mirageRenderNLMWidth",
@@ -319,6 +347,12 @@ def update_render_globals_tab():
     if cmds.control("mirageSkyTurbidity", exists=True):
         sky_is_preetham = cmds.getAttr("defaultMirageRenderGlobals.skyType") == 1
         cmds.attrFieldSliderGrp("mirageSkyTurbidity", edit=True, enable=sky_is_preetham)
+
+    # Width/falloff are meaningless while denoise itself is off.
+    if cmds.control("mirageRenderNLMWidth", exists=True) and cmds.control("mirageRenderNLMFalloff", exists=True):
+        denoise_enabled = cmds.getAttr("defaultMirageRenderGlobals.enableDenoise")
+        cmds.attrFieldSliderGrp("mirageRenderNLMWidth", edit=True, enable=denoise_enabled)
+        cmds.attrFieldSliderGrp("mirageRenderNLMFalloff", edit=True, enable=denoise_enabled)
 
 
 # Register create Mirage Renderer Tab

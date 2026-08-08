@@ -40,14 +40,17 @@ class MirageGlobalsControls(Custom):
             self.addControl("enableDepthAOV")
             self.addControl("enableNormalAOV")
             self.addControl("enablePrimIdAOV")
+            self.addControl("enableAlbedoAOV")
 
         with self.frameLayout("Output", expanded=False):
             self.addControl("outputImageFormat")
+            self.addControl("viewTransform")
 
         with self.frameLayout("Instancing", expanded=False):
             self.addControl("enableInstancing")
 
-        with self.frameLayout("NLM Denoising", expanded=False):
+        with self.frameLayout("Denoise (NLM)", expanded=False):
+            self.addControl("enableDenoise")
             self.addControl("nlmWidth")
             self.addControl("nlmFalloff")
 

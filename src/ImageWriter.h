@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <mirage/math/Color.h>
+#include <mirage/utils/Util.h>
 
 // 8-bit PNG/JPG/BMP/TGA (via the vendored stb_image_write.h, also used by
 // mirage/tools/scene_renderer) plus, as of Mirage v1.1.0, 32-bit float EXR
@@ -29,18 +30,24 @@ class ImageWriter
 public:
 	static const char *FormatExtension(ImageOutputFormat format);
 
-	// PNG/JPG/BMP/TGA: tonemaps `pixels` (already fully resolved to linear
-	// radiance directly by the renderer backend - both CPU and GPU
-	// Render() calls return final, displayable color, no further
-	// resolve/division needed by the caller) via Mirage::ToneMap, exactly matching
-	// mirage/tools/scene_renderer/SceneRenderer.cpp's own
-	// tonemap-then-8-bit-clamp sequence, and writes the result to `path`.
-	// EXR: skips tonemapping/quantization entirely and writes `pixels`
-	// as-is (raw linear float32 RGBA, alpha forced to 1.0 - see WriteImage's
-	// own comment) - the whole point of the format is preserving full
-	// dynamic range, matching scene_renderer's WriteExr().
+	// PNG/JPG/BMP/TGA: `pixels` (already fully resolved to linear radiance
+	// directly by the renderer backend - both CPU and GPU Render() calls
+	// return final, displayable-space-pending color, no further
+	// resolve/division needed by the caller) is mapped to display space via
+	// Mirage v1.3.0's Mirage::ApplyViewTransform(pixel, viewTransform,
+	// exposure) - exposure-scale then the selected display transform -
+	// exactly matching mirage/tools/scene_renderer/SceneRenderer.cpp's own
+	// WriteRenderProduct()/ApplyViewTransform-then-8-bit-clamp sequence, and
+	// writes the result to `path`.
+	// EXR: skips the view transform/exposure and quantization entirely and
+	// writes `pixels` as-is (raw linear float32 RGBA, alpha forced to 1.0 -
+	// see WriteImage's own comment) - the whole point of the format is
+	// preserving full dynamic range, matching scene_renderer's WriteExr()/
+	// WriteRenderProduct()'s "EXR output is always raw/untonemapped"
+	// convention.
 	// Returns false (and logs via MGlobal::displayError) on failure -
 	// never throws.
 	static bool WriteImage(const std::string &path, const std::vector<Mirage::Color> &pixels,
-							int width, int height, ImageOutputFormat format);
+							int width, int height, ImageOutputFormat format,
+							Mirage::ViewTransform viewTransform, float exposure);
 };
