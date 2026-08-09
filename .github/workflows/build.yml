@@ -262,11 +262,19 @@ jobs:
           echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
           echo "ARCHIVE_NAME=MirageMaya-${{ steps.version.outputs.version }}-maya${{ matrix.maya_version }}-${{ matrix.os }}-${{ matrix.arch }}" >> "$GITHUB_ENV"
 
+      # GitHub's Windows runner images have no `zip` CLI (Info-Zip) at all -
+      # confirmed the hard way ("zip: command not found") - only 7-Zip,
+      # which Mirage's own build-release.yml already relies on for the same
+      # reason on its Windows leg.
       - name: Archive
         shell: bash
         run: |
           cd "$STAGE_DIR"
-          zip -r "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            7z a -tzip "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          else
+            zip -r "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
