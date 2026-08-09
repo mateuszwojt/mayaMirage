@@ -73,7 +73,8 @@ namespace
 }
 
 bool ImageWriter::WriteImage(const std::string &path, const std::vector<Mirage::Color> &pixels,
-							  int width, int height, ImageOutputFormat format)
+							  int width, int height, ImageOutputFormat format,
+							  Mirage::ViewTransform viewTransform, float exposure)
 {
 	if (static_cast<int>(pixels.size()) != width * height)
 	{
@@ -85,16 +86,19 @@ bool ImageWriter::WriteImage(const std::string &path, const std::vector<Mirage::
 		return WriteExr(path, pixels, width, height);
 
 	// Matches mirage/tools/scene_renderer/SceneRenderer.cpp's own
-	// tonemap-then-8-bit-clamp sequence exactly, for output consistency
-	// with the rest of the Mirage tool family. Note ToneMap's second
-	// parameter is named "limit" and is actually unused by its
-	// implementation (mirage/utils/Util.h) - exposure is not applied here,
-	// matching that reference tool's existing (if perhaps incomplete)
-	// behavior rather than silently diverging from it.
+	// WriteRenderProduct()'s ApplyViewTransform-then-8-bit-clamp sequence
+	// exactly, for output consistency with the rest of the Mirage tool
+	// family. Mirage::ApplyViewTransform (mirage/utils/Util.h, v1.3.0)
+	// applies `exposure` as a multiplicative scale before the chosen
+	// display transform - this plugin previously called Mirage::ToneMap
+	// directly with a hardcoded limit of 0.0f and no exposure at all; as of
+	// Mirage v1.3.0, ToneMap's `limit` parameter went from dead/ignored to
+	// a real pre-curve divisor, so that old call would now blow every pixel
+	// out to white (dividing by ~0) instead of silently doing nothing.
 	std::vector<unsigned char> imageData(static_cast<size_t>(width) * height * 3);
 	for (int i = 0; i < width * height; ++i)
 	{
-		Mirage::Color pixel = Mirage::ToneMap(pixels[i], 0.0f);
+		Mirage::Color pixel = Mirage::ApplyViewTransform(pixels[i], viewTransform, exposure);
 
 		imageData[i * 3 + 0] = static_cast<unsigned char>(255.0f * Mirage::Clamp(pixel.x, 0.0f, 1.0f));
 		imageData[i * 3 + 1] = static_cast<unsigned char>(255.0f * Mirage::Clamp(pixel.y, 0.0f, 1.0f));

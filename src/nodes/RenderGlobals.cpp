@@ -32,11 +32,14 @@ MObject RenderGlobalsNode::gShutterClose;
 MObject RenderGlobalsNode::gEnableDepthAOV;
 MObject RenderGlobalsNode::gEnableNormalAOV;
 MObject RenderGlobalsNode::gEnablePrimIdAOV;
+MObject RenderGlobalsNode::gEnableAlbedoAOV;
 MObject RenderGlobalsNode::gOutputImageFormat;
+MObject RenderGlobalsNode::gViewTransform;
 MObject RenderGlobalsNode::gEnableInstancing;
 MObject RenderGlobalsNode::gSkyType;
 MObject RenderGlobalsNode::gSkyTurbidity;
 
+MObject RenderGlobalsNode::gEnableDenoise;
 MObject RenderGlobalsNode::gNLMWidth;
 MObject RenderGlobalsNode::gNLMFalloff;
 
@@ -67,6 +70,16 @@ Mirage::Options RenderGlobalsNode::DefaultOptions()
 	opts.maxDepth = 5;
 	opts.maxSamples = 16;
 	opts.enableDOF = false;
+
+	// Mirage v1.3.0: CPU-backend-only progressive averaging of AOV buffers
+	// (depth/normal/albedo - kAovPrimId is unconditionally exempted by
+	// Mirage itself, see Renderer.cpp) instead of a first-hit-only
+	// snapshot. Strictly better quality with no real downside - the GPU
+	// backend ignores this flag outright - and it also sharpens the
+	// albedo/normal buffers NLM denoise uses as guide buffers (see
+	// RenderWorker.cpp) - so this is turned on unconditionally rather than
+	// exposed as its own render-globals checkbox.
+	opts.accumulateAovs = true;
 	return opts;
 }
 
@@ -170,6 +183,15 @@ MStatus RenderGlobalsNode::initialize()
 	CHECK_MSTATUS(status);
 	addAttribute(gEnablePrimIdAOV);
 
+	// Mirage v1.3.0's kAovAlbedo - resolved (texture-sampled) base color at
+	// the primary hit. Also doubles as an NLM denoise guide buffer (see
+	// RenderWorker.cpp) - requested automatically when denoise is on even
+	// if this box is unchecked, without leaking into the Render View's AOV
+	// channel selector as a phantom channel (see m_requestedAovMask there).
+	gEnableAlbedoAOV = numAttr.create("enableAlbedoAOV", "enableAlbedoAOV", MFnNumericData::kBoolean, false, &status);
+	CHECK_MSTATUS(status);
+	addAttribute(gEnableAlbedoAOV);
+
 	// PNG/JPG/BMP/TGA (8-bit, via vendored stb_image_write.h) plus, as of
 	// Mirage v1.1.0, EXR (32-bit float, via vendored tinyexr.h) - matches
 	// what ImageWriter can actually produce, not Maya's full format list.
@@ -181,6 +203,21 @@ MStatus RenderGlobalsNode::initialize()
 	eAttr.addField("TGA", 3);
 	eAttr.addField("EXR", 4);
 	addAttribute(gOutputImageFormat);
+
+	// Mirage v1.3.0's Mirage::ViewTransform (mirage/utils/Util.h) - field
+	// values must mirror that enum's declaration order exactly (eNone=0,
+	// eFilmic=1, eAcesLike=2, eSrgbDisplay=3), the same ordering
+	// contract gRenderType/gSkyType above already rely on. Default eFilmic
+	// matches this plugin's pre-1.3.0 always-filmic behavior (ImageWriter
+	// used to call Mirage::ToneMap unconditionally) and Mirage's own
+	// RenderProduct::viewTransform default.
+	gViewTransform = eAttr.create("viewTransform", "viewTransform", 1, &status);
+	CHECK_MSTATUS(status);
+	eAttr.addField("None", 0);
+	eAttr.addField("Filmic", 1);
+	eAttr.addField("ACES-like", 2);
+	eAttr.addField("sRGB Display", 3);
+	addAttribute(gViewTransform);
 
 	gEnableInstancing = numAttr.create("enableInstancing", "enableInstancing", MFnNumericData::kBoolean, true, &status);
 	CHECK_MSTATUS(status);
@@ -202,6 +239,13 @@ MStatus RenderGlobalsNode::initialize()
 	numAttr.setMin(1.0f);
 	numAttr.setMax(10.0f);
 	addAttribute(gSkyTurbidity);
+
+	// Mirage v1.3.0: previously-dead nlmWidth/nlmFalloff below are now
+	// actually consumed (via Mirage::NonLocalMeansFilter, applied as a
+	// post-process - see RenderWorker.cpp), gated on this checkbox.
+	gEnableDenoise = numAttr.create("enableDenoise", "enableDenoise", MFnNumericData::kBoolean, false, &status);
+	CHECK_MSTATUS(status);
+	addAttribute(gEnableDenoise);
 
 	gNLMWidth = numAttr.create("nlmWidth", "nlmWidth", MFnNumericData::kFloat, opts.nlmWidth, &status);
 	CHECK_MSTATUS(status);
@@ -298,6 +342,9 @@ Mirage::Options RenderGlobalsNode::getRenderOptions()
 	MPlug pNLMFalloff(mObj, gNLMFalloff);
 	pNLMFalloff.getValue(opts.nlmFalloff);
 
+	MPlug pEnableDenoise(mObj, gEnableDenoise);
+	pEnableDenoise.getValue(opts.enableDenoise);
+
 	opts.aovMask = getAovMask();
 
 	return opts;
@@ -341,6 +388,12 @@ uint32_t RenderGlobalsNode::getAovMask()
 	if (enablePrimId)
 		mask |= Mirage::kAovPrimId;
 
+	bool enableAlbedo = false;
+	MPlug pAlbedo(mObj, gEnableAlbedoAOV);
+	pAlbedo.getValue(enableAlbedo);
+	if (enableAlbedo)
+		mask |= Mirage::kAovAlbedo;
+
 	return mask;
 }
 
@@ -367,6 +420,41 @@ ImageOutputFormat RenderGlobalsNode::getOutputImageFormat()
 	default:
 		return ImageOutputFormat::ePng;
 	}
+}
+
+Mirage::ViewTransform RenderGlobalsNode::getViewTransform()
+{
+	MObject mObj;
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
+		return Mirage::ViewTransform::eFilmic;
+
+	int viewTransform = 1; // eFilmic
+	MPlug pViewTransform(mObj, gViewTransform);
+	pViewTransform.getValue(viewTransform);
+
+	switch (viewTransform)
+	{
+	case 0:
+		return Mirage::ViewTransform::eNone;
+	case 2:
+		return Mirage::ViewTransform::eAcesLike;
+	case 3:
+		return Mirage::ViewTransform::eSrgbDisplay;
+	default:
+		return Mirage::ViewTransform::eFilmic;
+	}
+}
+
+bool RenderGlobalsNode::getEnableDenoise()
+{
+	MObject mObj;
+	if (getDependencyNodeByName(RenderGlobalsNode::kInstanceName, mObj) != MS::kSuccess)
+		return false;
+
+	bool enabled = false;
+	MPlug pEnabled(mObj, gEnableDenoise);
+	pEnabled.getValue(enabled);
+	return enabled;
 }
 
 bool RenderGlobalsNode::getEnableInstancing()

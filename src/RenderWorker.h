@@ -10,6 +10,7 @@
 
 #include <mirage/core/Renderer.h>
 #include <mirage/camera/Camera.h>
+#include <mirage/utils/Util.h>
 
 #include "RenderSession.h"
 
@@ -103,9 +104,19 @@ private:
 	// Pushes AOV buffers (already backend-resolved) into the Render View's
 	// own native AOV channel selector via updatePixels()'s numberOfAOVs/
 	// pAOVs parameters, alongside the main beauty updatePixels() call.
+	// `aovMask` should be m_requestedAovMask (the user's actual AOV
+	// checkboxes), not m_options.aovMask - the latter may have denoise's
+	// guide-only albedo/normal bits OR'd in, which must never surface as a
+	// phantom Render View AOV channel the user didn't ask for. `beauty` is
+	// the same (possibly denoised) pixel snapshot the caller already passed
+	// to PushPixelsToRenderView - taken as a parameter rather than this
+	// function re-reading m_latestPixels itself, so the AOV-attached
+	// updatePixels() call below re-sends the exact same beauty frame
+	// instead of silently reverting a just-applied denoise.
 	void PushAovsToRenderView(unsigned int left, unsigned int right, unsigned int bottom, unsigned int top,
-							   uint32_t aovMask, const std::vector<Mirage::Color> &depth,
-							   const std::vector<Mirage::Color> &normal, const std::vector<Mirage::Color> &primId);
+							   uint32_t aovMask, const std::vector<Mirage::Color> &beauty,
+							   const std::vector<Mirage::Color> &depth, const std::vector<Mirage::Color> &normal,
+							   const std::vector<Mirage::Color> &primId, const std::vector<Mirage::Color> &albedo);
 
 	void FinishRender();
 
@@ -119,16 +130,33 @@ private:
 	std::vector<Mirage::Color> m_workingPixels; // worker-thread-owned
 	std::vector<Mirage::Color> m_latestPixels;  // guarded by m_bufferMutex
 
-	// AOV buffers (depth/normal/primId) - single-valued first-hit snapshots,
-	// not progressively accumulated like the beauty buffer above, so
-	// re-writing them every sample and keeping only the latest is correct
-	// (see mirage/core/Renderer.h's AovBuffers doc). Empty/unused unless the
-	// corresponding Options::aovMask bit is set.
-	std::vector<Mirage::Color> m_workingDepth, m_workingNormal, m_workingPrimId;   // worker-thread-owned
-	std::vector<Mirage::Color> m_latestDepth, m_latestNormal, m_latestPrimId;     // guarded by m_bufferMutex
+	// AOV buffers (depth/normal/primId/albedo) - single-valued first-hit
+	// snapshots by default (Mirage v1.3.0's Options::accumulateAovs, on
+	// unconditionally per RenderGlobalsNode::DefaultOptions(), instead
+	// progressively averages depth/normal/albedo on the CPU backend - see
+	// mirage/core/Renderer.h's AovBuffers doc). Empty/unused unless the
+	// corresponding Options::aovMask bit is set - which, for albedo/normal,
+	// may be true even with their own AOV checkboxes off, when denoise's
+	// guide-buffer request set it (see m_requestedAovMask below).
+	std::vector<Mirage::Color> m_workingDepth, m_workingNormal, m_workingPrimId, m_workingAlbedo; // worker-thread-owned
+	std::vector<Mirage::Color> m_latestDepth, m_latestNormal, m_latestPrimId, m_latestAlbedo;    // guarded by m_bufferMutex
+
+	// The AOV bits the user's render-globals checkboxes actually asked for -
+	// kept separate from m_options.aovMask, which StartRender() may OR
+	// denoise's guide-only kAovAlbedo/kAovNormal bits into. Used wherever an
+	// AOV mask needs to reflect "what should the Render View's channel
+	// selector show", not "what should Render() populate".
+	uint32_t m_requestedAovMask = 0;
 
 	Mirage::Camera m_camera;
 	Mirage::Options m_options{};
+
+	// Display transform + (via m_options.exposure) exposure applied when
+	// pushing pixels to the Render View, captured once per render
+	// (StartRender) from RenderGlobalsNode::getViewTransform() - keeps the
+	// interactive preview visually consistent with batch output, which
+	// applies the same Mirage::ApplyViewTransform via ImageWriter.
+	Mirage::ViewTransform m_viewTransform = Mirage::ViewTransform::eFilmic;
 
 	MComputation m_computation;
 	MCallbackId m_idleCallbackId = 0;

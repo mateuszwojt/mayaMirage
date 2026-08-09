@@ -57,6 +57,20 @@ jobs:
             plugin_ext: .so
             mirage_os_arch: linux-x86_64
             devkit_asset: Autodesk_Maya_2027_DEVKIT_Linux.tgz
+          - maya_version: "2026"
+            os: windows
+            arch: x86_64
+            runner: windows-2022
+            plugin_ext: .mll
+            mirage_os_arch: windows-x86_64
+            devkit_asset: Autodesk_Maya_2026_DEVKIT_Windows.zip
+          - maya_version: "2027"
+            os: windows
+            arch: x86_64
+            runner: windows-2022
+            plugin_ext: .mll
+            mirage_os_arch: windows-x86_64
+            devkit_asset: Autodesk_Maya_2027_DEVKIT_Windows.zip
     steps:
       - uses: actions/checkout@v4
 
@@ -80,15 +94,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev libx11-dev libxrandr-dev
 
+      # Matches Mirage's own build-release.yml's Windows step - no apt/brew
+      # equivalent on Windows, so the Vulkan SDK is fetched directly.
+      - name: Install Vulkan loader/headers (Windows)
+        if: matrix.os == 'windows'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      # Every step below is written in POSIX shell (set -euo pipefail, case,
+      # curl, tar, cp -R) and relies on that being `run:`'s default shell -
+      # true on macOS/Linux runners, but GitHub's Windows runners default
+      # `run:` to PowerShell instead. `shell: bash` forces Git Bash (present
+      # on GitHub-hosted Windows runners) so the same script runs unchanged
+      # on all three platforms.
+
       # Maya devkit archives are proprietary Autodesk downloads and are not
       # publicly fetchable. They're stored, under Autodesk's own download
       # names, as assets on the `devkits` release in a private GitHub repo,
       # pulled here via a fine-grained PAT (MAYA_DEVKIT_PAT). The macOS asset
-      # is a .dmg disk image; Linux's is a plain .tgz. Neither archive's
-      # internal layout is assumed - both are searched for wherever
-      # include/maya/MFn.h actually ends up, since Autodesk wraps the devkit
-      # in an inner folder whose name isn't guaranteed to be "devkitBase".
+      # is a .dmg disk image, Linux's is a plain .tgz, Windows's is a .zip.
+      # None of the three archives' internal layout is assumed - all are
+      # searched for wherever include/maya/MFn.h actually ends up, since
+      # Autodesk wraps the devkit in an inner folder whose name isn't
+      # guaranteed to be "devkitBase".
       - name: Fetch Maya devkit
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.MAYA_DEVKIT_PAT }}
         run: |
@@ -115,6 +148,11 @@ jobs:
               mkdir -p "$root"
               tar -xzf "$asset" -C "$root"
               ;;
+            *.zip)
+              root="${{ runner.temp }}/devkit-extract"
+              mkdir -p "$root"
+              unzip -q "$asset" -d "$root"
+              ;;
             *)
               echo "::error::unrecognized Maya devkit archive type: $asset"
               exit 1
@@ -135,47 +173,108 @@ jobs:
 
           echo "DEVKIT_LOCATION=$devkit_dir" >> "$GITHUB_ENV"
 
-      # Mirage publishes public per-OS/arch install tarballs on its own
+      # Mirage publishes public per-OS/arch install archives on its own
       # GitHub Releases; the exact version consumed here is pinned via the
       # checked-in MIRAGE_VERSION file so bumping it is a reviewable one-line
-      # change rather than silently floating to "latest".
+      # change rather than silently floating to "latest". Mirage's own
+      # release workflow (build-release.yml) packages Windows as a .zip
+      # (via 7z) and every other platform as a .tar.gz - confirmed against
+      # the actual v1.3.0 release assets, not just assumed from the
+      # macOS/Linux naming.
       - name: Fetch Mirage
+        shell: bash
         run: |
           mirage_version="$(cat MIRAGE_VERSION)"
-          mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.tar.gz"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.zip"
+          else
+            mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.tar.gz"
+          fi
           mkdir -p "${{ runner.temp }}/mirage"
           curl -fL -o "${{ runner.temp }}/${mirage_asset}" \
             "https://github.com/mateuszwojt/Mirage/releases/download/${mirage_version}/${mirage_asset}"
-          tar -xzf "${{ runner.temp }}/${mirage_asset}" -C "${{ runner.temp }}/mirage"
+          case "$mirage_asset" in
+            *.zip)
+              unzip -q "${{ runner.temp }}/${mirage_asset}" -d "${{ runner.temp }}/mirage"
+              ;;
+            *)
+              tar -xzf "${{ runner.temp }}/${mirage_asset}" -C "${{ runner.temp }}/mirage"
+              ;;
+          esac
           echo "MIRAGE_INSTALL_DIR=${{ runner.temp }}/mirage" >> "$GITHUB_ENV"
 
       - name: Configure
+        shell: bash
         run: |
           cmake -S . -B build \
             -DMAYA_VERSION=${{ matrix.maya_version }} \
             -DMirage_DIR="${MIRAGE_INSTALL_DIR}/lib/cmake/Mirage" \
             -DCMAKE_BUILD_TYPE=Release
 
+      # --config Release matters only on Windows's multi-config Visual Studio
+      # generator (the default when no -G is passed): unlike single-config
+      # generators (Unix Makefiles on macOS/Linux), CMAKE_BUILD_TYPE at
+      # configure time is silently ignored there - the actual configuration
+      # is chosen at build time, defaulting to Debug when --config is
+      # omitted. Building mayaMirage's own code Debug (/MDd) while linking
+      # against Mirage's Release-only prebuilt libs (/MD) is a CRT mismatch
+      # (LNK2038, _ITERATOR_DEBUG_LEVEL/RuntimeLibrary) - confirmed the hard
+      # way on a real windows-x86_64 CI run. Harmless no-op flag on the
+      # single-config generators.
       - name: Build
-        run: cmake --build build -j
+        shell: bash
+        run: cmake --build build -j --config Release
 
       # Not `cmake --install`: the root CMakeLists.txt's install() rules use
       # an absolute, non-relocatable ${Maya_HOME_DIR} destination (the real
       # per-user Maya prefs dir), so `--prefix` can't redirect it. Stage the
       # release layout by hand instead.
       - name: Stage package
+        shell: bash
         run: |
           stage="${{ runner.temp }}/stage"
           mkdir -p "$stage/plug-ins" "$stage/scripts"
-          cp "build/src/MirageMaya${{ matrix.plugin_ext }}" "$stage/plug-ins/"
+
+          # Visual Studio's multi-config generator nests build output under a
+          # per-configuration subdirectory (build/src/Release/MirageMaya.mll)
+          # - the single-config Unix Makefiles generator on macOS/Linux has
+          # no such subdirectory (build/src/MirageMaya.bundle|.so directly).
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            plugin_path="build/src/Release/MirageMaya${{ matrix.plugin_ext }}"
+          else
+            plugin_path="build/src/MirageMaya${{ matrix.plugin_ext }}"
+          fi
+          cp "$plugin_path" "$stage/plug-ins/"
           cp -R scripts/MirageMaya "$stage/scripts/"
+
+          # Windows has no rpath equivalent - src/CMakeLists.txt's
+          # INSTALL_RPATH (how macOS/Linux resolve libslang.dylib/.so at
+          # runtime) is a no-op there. Windows instead resolves a loaded
+          # module's DLL dependencies from, among other places, the loading
+          # module's own directory - so Mirage's Slang runtime DLLs (which
+          # its own install already places under lib/, see Mirage's
+          # mirage/kernels/CMakeLists.txt) are copied next to the staged
+          # .mll here instead.
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp "${MIRAGE_INSTALL_DIR}"/lib/*.dll "$stage/plug-ins/" 2>/dev/null || true
+          fi
+
           echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
           echo "ARCHIVE_NAME=MirageMaya-${{ steps.version.outputs.version }}-maya${{ matrix.maya_version }}-${{ matrix.os }}-${{ matrix.arch }}" >> "$GITHUB_ENV"
 
+      # GitHub's Windows runner images have no `zip` CLI (Info-Zip) at all -
+      # confirmed the hard way ("zip: command not found") - only 7-Zip,
+      # which Mirage's own build-release.yml already relies on for the same
+      # reason on its Windows leg.
       - name: Archive
+        shell: bash
         run: |
           cd "$STAGE_DIR"
-          zip -r "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            7z a -tzip "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          else
+            zip -r "${{ github.workspace }}/${ARCHIVE_NAME}.zip" .
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
