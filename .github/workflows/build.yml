@@ -173,19 +173,34 @@ jobs:
 
           echo "DEVKIT_LOCATION=$devkit_dir" >> "$GITHUB_ENV"
 
-      # Mirage publishes public per-OS/arch install tarballs on its own
+      # Mirage publishes public per-OS/arch install archives on its own
       # GitHub Releases; the exact version consumed here is pinned via the
       # checked-in MIRAGE_VERSION file so bumping it is a reviewable one-line
-      # change rather than silently floating to "latest".
+      # change rather than silently floating to "latest". Mirage's own
+      # release workflow (build-release.yml) packages Windows as a .zip
+      # (via 7z) and every other platform as a .tar.gz - confirmed against
+      # the actual v1.3.0 release assets, not just assumed from the
+      # macOS/Linux naming.
       - name: Fetch Mirage
         shell: bash
         run: |
           mirage_version="$(cat MIRAGE_VERSION)"
-          mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.tar.gz"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.zip"
+          else
+            mirage_asset="mirage-${mirage_version}-${{ matrix.mirage_os_arch }}.tar.gz"
+          fi
           mkdir -p "${{ runner.temp }}/mirage"
           curl -fL -o "${{ runner.temp }}/${mirage_asset}" \
             "https://github.com/mateuszwojt/Mirage/releases/download/${mirage_version}/${mirage_asset}"
-          tar -xzf "${{ runner.temp }}/${mirage_asset}" -C "${{ runner.temp }}/mirage"
+          case "$mirage_asset" in
+            *.zip)
+              unzip -q "${{ runner.temp }}/${mirage_asset}" -d "${{ runner.temp }}/mirage"
+              ;;
+            *)
+              tar -xzf "${{ runner.temp }}/${mirage_asset}" -C "${{ runner.temp }}/mirage"
+              ;;
+          esac
           echo "MIRAGE_INSTALL_DIR=${{ runner.temp }}/mirage" >> "$GITHUB_ENV"
 
       - name: Configure
