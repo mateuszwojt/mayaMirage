@@ -211,9 +211,19 @@ jobs:
             -DMirage_DIR="${MIRAGE_INSTALL_DIR}/lib/cmake/Mirage" \
             -DCMAKE_BUILD_TYPE=Release
 
+      # --config Release matters only on Windows's multi-config Visual Studio
+      # generator (the default when no -G is passed): unlike single-config
+      # generators (Unix Makefiles on macOS/Linux), CMAKE_BUILD_TYPE at
+      # configure time is silently ignored there - the actual configuration
+      # is chosen at build time, defaulting to Debug when --config is
+      # omitted. Building mayaMirage's own code Debug (/MDd) while linking
+      # against Mirage's Release-only prebuilt libs (/MD) is a CRT mismatch
+      # (LNK2038, _ITERATOR_DEBUG_LEVEL/RuntimeLibrary) - confirmed the hard
+      # way on a real windows-x86_64 CI run. Harmless no-op flag on the
+      # single-config generators.
       - name: Build
         shell: bash
-        run: cmake --build build -j
+        run: cmake --build build -j --config Release
 
       # Not `cmake --install`: the root CMakeLists.txt's install() rules use
       # an absolute, non-relocatable ${Maya_HOME_DIR} destination (the real
@@ -224,7 +234,17 @@ jobs:
         run: |
           stage="${{ runner.temp }}/stage"
           mkdir -p "$stage/plug-ins" "$stage/scripts"
-          cp "build/src/MirageMaya${{ matrix.plugin_ext }}" "$stage/plug-ins/"
+
+          # Visual Studio's multi-config generator nests build output under a
+          # per-configuration subdirectory (build/src/Release/MirageMaya.mll)
+          # - the single-config Unix Makefiles generator on macOS/Linux has
+          # no such subdirectory (build/src/MirageMaya.bundle|.so directly).
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            plugin_path="build/src/Release/MirageMaya${{ matrix.plugin_ext }}"
+          else
+            plugin_path="build/src/MirageMaya${{ matrix.plugin_ext }}"
+          fi
+          cp "$plugin_path" "$stage/plug-ins/"
           cp -R scripts/MirageMaya "$stage/scripts/"
 
           # Windows has no rpath equivalent - src/CMakeLists.txt's
